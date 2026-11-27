@@ -225,7 +225,7 @@ test('lists historical agents once by UUID and refreshes relationships without o
   const index = await log.store.indexed(parent);
   assert.ok(index.page().events.every(record => !record.agents));
   const before = index.revision;
-  assert.deepEqual(index.agentLinks(), [{ id: child, label: '/root/example' }, { id: null, label: '未登记代理' }]);
+  assert.deepEqual(index.agentLinks(), [{ id: child, label: '/root/example', path: '/root/example' }, { id: null, label: '未登记代理' }]);
   await assert.rejects(log.store.indexed(child), { status: 404 });
 
   await appendFile(log.path, event('item_completed', { item: {
@@ -234,6 +234,6 @@ test('lists historical agents once by UUID and refreshes relationships without o
   assert.equal(await log.store.indexed(parent), index);
   assert.ok(index.revision > before);
   const after = index.readByteCount;
-  assert.deepEqual(index.agentLinks(), [{ id: child, label: '/root/example' }, { id: second, label: '/root/resolved' }]);
+  assert.deepEqual(index.agentLinks(), [{ id: child, label: '/root/example', path: '/root/example' }, { id: second, label: '/root/resolved', path: '/root/resolved' }]);
   assert.equal(index.readByteCount, after);
 });

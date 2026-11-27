@@ -1,6 +1,8 @@
-import { useEffect, useState } from 'react';
-import type { FormEvent } from 'react';
-import { SessionPicker } from './SessionTools.tsx';
+import { useEffect, useRef, useState } from 'react';
+import type { SessionMeta } from '../model.ts';
+import { request, sessionUrl } from './api.ts';
+import { Dropdown } from './Dropdown.tsx';
+import { SessionMenu, sessionLabel } from './SessionTools.tsx';
 import { Trajectory } from './Trajectory.tsx';
 import { useTrajectory } from './useTrajectory.ts';
 
@@ -27,6 +29,13 @@ function storeStack(stack: string[]) {
   history.pushState({ trajectoryStack: stack }, '', url);
 }
 
+function subagentLabel(meta: SessionMeta) {
+  const name = meta.name?.trim();
+  const path = meta.agentPath?.trim();
+  if (name && path) return `${name} · ${path}`;
+  return name || path || meta.id.slice(0, 8);
+}
+
 interface AppProps {
   embedded?: boolean;
   hostSession?: string;
@@ -35,17 +44,35 @@ interface AppProps {
 export function App({ embedded = false, hostSession }: AppProps) {
   const [stack, setStack] = useState(() => embedded ? hostSession ? [hostSession] : [] : currentStack());
   const id = stack.at(-1) ?? '';
-  const [input, setInput] = useState(id);
-  const [picker, setPicker] = useState(embedded && !hostSession);
   const [reload, setReload] = useState(0);
+  const metaCache = useRef(new Map<string, SessionMeta>());
+  const [metas, setMetas] = useState<ReadonlyMap<string, SessionMeta>>(new Map());
+
+  useEffect(() => {
+    const missing = stack.filter(session => !metaCache.current.has(session));
+    if (missing.length === 0) {
+      if (metaCache.current.size !== metas.size) setMetas(new Map(metaCache.current));
+      return;
+    }
+    const abort = new AbortController();
+    void Promise.all(missing.map(async session => {
+      try {
+        const meta = await request<SessionMeta>(sessionUrl(session) + '/meta', abort.signal);
+        metaCache.current.set(session, meta);
+      } catch {
+        // A name is optional; the trajectory request reports the actionable fault.
+      }
+    })).then(() => {
+      if (!abort.signal.aborted) setMetas(new Map(metaCache.current));
+    });
+    return () => abort.abort();
+  }, [stack]);
 
   useEffect(() => {
     if (embedded) return;
     const navigate = () => {
       const next = currentStack();
       setStack(next);
-      setInput(next.at(-1) ?? '');
-      setPicker(false);
     };
     window.addEventListener('popstate', navigate);
     return () => window.removeEventListener('popstate', navigate);
@@ -54,21 +81,13 @@ export function App({ embedded = false, hostSession }: AppProps) {
   function navigate(next: string[]) {
     if (!embedded) storeStack(next);
     setStack(next);
-    setInput(next.at(-1) ?? '');
-    setPicker(false);
   }
 
-  function open(id: string) {
-    if (stack.length === 1 && stack[0] === id) {
-      setReload(value => value + 1);
-      setPicker(false);
-    } else navigate([id]);
-  }
-
-  function submit(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    const next = input.trim();
-    if (next) open(next);
+  function open(next: string) {
+    const value = next.trim();
+    if (!value) return;
+    if (stack.length === 1 && stack[0] === value) setReload(count => count + 1);
+    else navigate([value]);
   }
 
   function inspectAgent(agent: string) {
@@ -84,19 +103,34 @@ export function App({ embedded = false, hostSession }: AppProps) {
     }
   }
 
+  const current = id ? metas.get(id) ?? null : null;
+  const parentId = stack.length > 1 ? stack.at(-2)! : current?.kind === 'subagent' ? current.parentId : null;
+  const parentName = parentId ? metas.get(parentId)?.name ?? null : null;
+  const trigger = !id ? '选择会话'
+    : current === null ? sessionLabel(null, id)
+      : current.kind === 'subagent' ? subagentLabel(current)
+        : sessionLabel(current.name, id);
+  const detail = [current?.name, current?.agentPath, id].filter(Boolean).join(' · ') || '切换会话';
+
   return <main className="shell">
     <header className="session-bar">
-      <h1>Codex 轨迹</h1>
-      {embedded && hostSession && id === hostSession ? <span className="record-count">当前聊天</span> : null}
-      {stack.length > 1 ? <button type="button" onClick={backToParent}>返回父会话</button> : null}
-      <form onSubmit={submit} aria-label="打开会话">
-        <input value={input} onChange={event => setInput(event.currentTarget.value)} placeholder="会话 ID"
-          aria-label="会话 ID" required spellCheck={false} autoComplete="off" />
-        <button type="submit">打开</button>
-      </form>
-      <button type="button" aria-expanded={picker} onClick={() => setPicker(value => !value)}>选择会话</button>
+      <div className="session-bar-main">
+        <h1>Codex 轨迹</h1>
+        <Dropdown className="session-trigger" ariaLabel="切换会话" title={detail}
+          minWidth={300} maxWidth={520} label={<span className="session-trigger-name">{trigger}</span>}>
+          {close => <SessionMenu current={id} choose={choose => { close(); open(choose); }} />}
+        </Dropdown>
+        {embedded && hostSession && id === hostSession ? <span className="session-badge">当前聊天</span> : null}
+        {current?.kind === 'subagent' ? <span className="session-badge session-badge-agent">子代理</span> : null}
+      </div>
+      <div className="session-bar-actions">
+        {stack.length > 1
+          ? <button type="button" onClick={backToParent} title={parentName ? `返回「${parentName}」` : undefined}>返回父会话</button>
+          : current?.kind === 'subagent' && current.parentId
+            ? <button type="button" onClick={() => navigate([current.parentId!])}>打开父会话</button>
+            : null}
+      </div>
     </header>
-    {picker ? <SessionPicker choose={open} /> : null}
     <div className="session-stack">
       {stack.map((session, index) => {
         const active = index === stack.length - 1;
@@ -105,7 +139,7 @@ export function App({ embedded = false, hostSession }: AppProps) {
           <LoadedSession id={session} active={active} openAgent={inspectAgent} />
         </div>;
       })}
-      {stack.length === 0 ? <p className="empty">输入 Codex 会话 ID 以查看轨迹。</p> : null}
+      {stack.length === 0 ? <p className="empty">从上方选择会话，或按会话 ID 打开。</p> : null}
     </div>
   </main>;
 }

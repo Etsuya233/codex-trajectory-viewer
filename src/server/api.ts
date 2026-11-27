@@ -1,9 +1,9 @@
 import type { DetailField } from '../model.ts';
 import { detailSourceLimit, readDetail, RequestError } from './session.ts';
 import { IndexStore } from './index.ts';
-import { listSessions } from './catalog.ts';
+import { SessionCatalog } from './catalog.ts';
 
-const sessionRoute = /^\/api\/sessions\/([^/]+)(?:\/(detail|updates|search|stats|agents))?$/;
+const sessionRoute = /^\/api\/sessions\/([^/]+)(?:\/(detail|updates|search|stats|agents|meta))?$/;
 
 function requiredInteger(search: URLSearchParams, key: string, minimum: number, maximum: number) {
   const raw = search.get(key);
@@ -20,13 +20,15 @@ function optionalOffset(search: URLSearchParams, key: string) {
 
 export function createTrajectoryApi(codexHome: string) {
   const store = new IndexStore(codexHome);
+  const catalog = new SessionCatalog(codexHome);
   return async (url: URL, signal?: AbortSignal): Promise<unknown> => {
     const search = url.searchParams;
-    if (url.pathname === '/api/sessions') return listSessions(codexHome, search.get('q') ?? '');
+    if (url.pathname === '/api/sessions') return catalog.sessions(search.get('q') ?? '');
     const route = url.pathname.match(sessionRoute);
     if (!route) throw new RequestError(404, '找不到该接口。');
 
     const [, id, endpoint] = route;
+    if (endpoint === 'meta') return catalog.meta(id);
     if (endpoint === 'detail') {
       const offset = requiredInteger(search, 'offset', 0, Number.MAX_SAFE_INTEGER);
       const length = requiredInteger(search, 'length', 1, detailSourceLimit);
@@ -51,7 +53,7 @@ export function createTrajectoryApi(codexHome: string) {
     }
     if (!endpoint) return index.page(before, around, after);
     if (endpoint === 'stats') return index.statistics();
-    if (endpoint === 'agents') return index.agentLinks();
+    if (endpoint === 'agents') return catalog.resolveAgents(index.agentLinks());
     if (endpoint === 'updates') {
       const revision = requiredInteger(search, 'revision', 0, Number.MAX_SAFE_INTEGER);
       return index.delta(generation ?? '', revision, optionalOffset(search, 'lower') ?? 0, optionalOffset(search, 'upper'));

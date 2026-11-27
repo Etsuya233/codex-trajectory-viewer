@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { open, stat } from 'node:fs/promises';
 import type { FileHandle } from 'node:fs/promises';
 import type { BigIntStats } from 'node:fs';
-import type { IndexedPage, SearchPage, SessionStats, ToolResult, TrajectoryDelta, TrajectoryEvent } from '../model.ts';
+import type { AgentLink, IndexedPage, SearchPage, SessionStats, ToolResult, TrajectoryDelta, TrajectoryEvent } from '../model.ts';
 import {
   agentLink, CHUNK_BYTES, completedCommand, describe, detailSourceLimit, eventFor, findSession, object, outputObject, parse, processId,
   readBytes, readRecent, RequestError, SESSION_ID, sourceFor, string,
@@ -48,6 +48,23 @@ function toolNamed(name: string, tool: string) {
   return name === tool || name.endsWith('.' + tool) || name.endsWith('__' + tool);
 }
 
+/** Keep the best label plus the first nickname/path/role seen for one agent thread. */
+function mergeAgent(previous: AgentLink | undefined, next: AgentLink): AgentLink {
+  if (!previous) return { ...next };
+  const id = previous.id ?? next.id;
+  const label = previous.label !== previous.id ? previous.label
+    : next.label !== next.id ? next.label : previous.label;
+  const name = previous.name ?? next.name;
+  const path = previous.path ?? next.path;
+  const role = previous.role ?? next.role;
+  return {
+    id, label,
+    ...(name ? { name } : {}),
+    ...(path ? { path } : {}),
+    ...(role ? { role } : {}),
+  };
+}
+
 export class SessionIndex {
   readonly generation = randomUUID();
   readonly path: string;
@@ -67,7 +84,7 @@ export class SessionIndex {
   private readonly resultOffsets = new Map<string, number>();
   private readonly endOffsets = new Map<string, number>();
   private readonly agentsByCall = new Map<string, NonNullable<TrajectoryEvent['agents']>>();
-  private readonly agentsById = new Map<string, { id: string; label: string }>();
+  private readonly agentsById = new Map<string, AgentLink>();
   private readonly unresolvedAgents = new Map<string, string>();
   private readonly resolvedAgentCalls = new Set<string>();
   private readonly processes = new Map<string, number>();
@@ -275,7 +292,8 @@ export class SessionIndex {
     this.linkProcess(call, result, callId);
     if (toolNamed(call.label, 'spawn_agent') && !call.agents?.some(agent => agent.id)) {
       const attrs = this.attributes.get(resultOffset) ?? {};
-      call.agents = [agentLink(attrs.agent_id ?? attrs.thread_id ?? attrs.new_thread_id, string(attrs.nickname))];
+      const name = string(attrs.nickname);
+      call.agents = [agentLink(attrs.agent_id ?? attrs.thread_id ?? attrs.new_thread_id, name, { ...(name ? { name } : {}) })];
       if (call !== event) this.collectAgents(call);
     }
     this.attributes.delete(resultOffset);
@@ -311,10 +329,7 @@ export class SessionIndex {
     for (const agent of event.agents) {
       if (agent.id === this.id) continue;
       if (agent.id !== null) {
-        const previous = this.agentsById.get(agent.id);
-        if (!previous || (previous.label === agent.id && agent.label !== agent.id)) {
-          this.agentsById.set(agent.id, { id: agent.id, label: agent.label });
-        }
+        this.agentsById.set(agent.id, mergeAgent(this.agentsById.get(agent.id), agent));
         this.resolvedAgentCalls.add(key);
         this.unresolvedAgents.delete(key);
       } else if (!this.resolvedAgentCalls.has(key)) {

@@ -1,8 +1,9 @@
 import { useEffect, useState } from 'react';
-import type { DetailField, DetailPage, EventKind, Source, TrajectoryEvent } from '../model.ts';
+import type { AgentLink, DetailField, DetailPage, EventKind, SessionMeta, Source, TrajectoryEvent } from '../model.ts';
 import type { TrajectoryCellKind } from './dsh/trajectory-record.ts';
 import ledger from './dsh/TrajectoryTable.module.css';
 import { errorMessage, request, sessionUrl } from './api.ts';
+import { agentLabel } from './SessionTools.tsx';
 
 export const kindStyles: Record<EventKind, { name: string; glyph: string; style: string; lane: TrajectoryCellKind }> = {
   user: { name: '用户', glyph: '人', style: ledger.user, lane: 'user' },
@@ -67,6 +68,24 @@ export function Content({ event }: { event: TrajectoryEvent }) {
   return <span className={ledger.contentText}>{event.preview || event.problem || event.label}</span>;
 }
 
+function AgentOpenButton({ agent, openAgent }: { agent: AgentLink; openAgent: (id: string) => void }) {
+  const [name, setName] = useState<string | null>(agent.name ?? null);
+  const [kind, setKind] = useState<SessionMeta['kind']>('subagent');
+  useEffect(() => {
+    if (!agent.id) return;
+    const abort = new AbortController();
+    request<SessionMeta>(sessionUrl(agent.id) + '/meta', abort.signal).then(meta => {
+      if (abort.signal.aborted) return;
+      setName(current => current ?? meta.name);
+      setKind(meta.kind);
+    }).catch(() => undefined);
+    return () => abort.abort();
+  }, [agent.id]);
+  const display = name ? (agent.path ? `${name} · ${agent.path}` : name) : agentLabel(agent);
+  const label = `${kind === 'thread' ? '打开会话' : '打开子代理'} ${display}`;
+  return <button type="button" title={label} onClick={() => openAgent(agent.id!)}>{label}</button>;
+}
+
 interface InspectorTab {
   label: string;
   source: Source;
@@ -112,8 +131,8 @@ export function Inspector({ id, event, close, openAgent }: { id: string; event: 
         ))}
       </div>
       {event.agents?.length ? <div className="record-meta">{event.agents.map((agent, index) =>
-        agent.id ? <button type="button" key={agent.id} onClick={() => openAgent(agent.id!)}>打开子代理 {agent.label}</button>
-          : <span key={index}>{agent.label} · 无可用会话 ID</span>)}</div> : null}
+        agent.id ? <AgentOpenButton key={agent.id} agent={agent} openAgent={openAgent} />
+          : <span key={index}>{agentLabel(agent)} · 无可用会话 ID</span>)}</div> : null}
       {tab.source.digest ? <Payload key={`${tab.source.offset}:${tab.field}`} id={id} tab={tab} />
         : <p className="payload">{event.problem}</p>}
     </aside>

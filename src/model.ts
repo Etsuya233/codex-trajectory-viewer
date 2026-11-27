@@ -25,6 +25,11 @@ export interface TrajectoryEvent {
 export interface AgentLink {
   id: string | null;
   label: string;
+  /** Human nickname recorded by the spawned agent, such as "Raman". */
+  name?: string | null;
+  /** Agent path recorded by the parent, such as "/root/m1_sol". */
+  path?: string | null;
+  role?: string | null;
 }
 
 export interface ToolResult {
@@ -63,7 +68,20 @@ export interface TrajectoryDelta {
 
 export interface SessionChoice {
   id: string;
+  name: string | null;
   date: string;
+  updatedAt: string | null;
+  archived: boolean;
+}
+
+export interface SessionMeta {
+  id: string;
+  name: string | null;
+  kind: 'thread' | 'subagent';
+  parentId: string | null;
+  agentPath: string | null;
+  agentRole: string | null;
+  date: string | null;
   archived: boolean;
 }
 

@@ -2,7 +2,8 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } fr
 import type { IndexedPage, TrajectoryEvent } from '../model.ts';
 import { sessionUrl } from './api.ts';
 import { Content, hasError, Inspector, KindTag, kindStyles, timeValue } from './RecordView.tsx';
-import { AgentDirectory, SessionSearch, Statistics } from './SessionTools.tsx';
+import { AgentMenu, SessionSearch, Statistics } from './SessionTools.tsx';
+import { Dropdown } from './Dropdown.tsx';
 import { TrajectoryTimeline } from './dsh/TrajectoryTimeline.tsx';
 import { trajectoryTimelineFocusIndexes } from './dsh/timeline.ts';
 import type { TrajectoryTimeRange, TrajectoryTimelineMode } from './dsh/timeline.ts';
@@ -62,8 +63,7 @@ export function Trajectory({ id, page, active, working, fault, fetchPage, openAg
   const [tool, setTool] = useState('');
   const [errorsOnly, setErrorsOnly] = useState(false);
   const [scope, setScope] = useState<'loaded' | 'all'>('loaded');
-  const [statistics, setStatistics] = useState(false);
-  const [showAgents, setShowAgents] = useState(false);
+  const [statistics, setStatistics] = useState(true);
   const [historyFailed, setHistoryFailed] = useState(false);
   const [mode, setMode] = useState<TrajectoryTimelineMode>('sequence');
   const [range, setRange] = useState<TrajectoryTimeRange | null>(null);
@@ -270,8 +270,11 @@ export function Trajectory({ id, page, active, working, fault, fetchPage, openAg
             onClick={() => setErrorsOnly(current => !current)}>仅错误</button>
           <button className={toolbar.toggle} type="button" aria-pressed={statistics}
             onClick={() => setStatistics(current => !current)}>统计</button>
-          <button className={toolbar.toggle} type="button" aria-expanded={showAgents}
-            onClick={() => setShowAgents(current => !current)}>子代理</button>
+          <Dropdown className={`${toolbar.toggle} dropdown-trigger`} ariaLabel="子代理" title="子代理" active={active}
+            minWidth={300} maxWidth={460} label={<span>子代理</span>}>
+            {close => <AgentMenu id={id} generation={page.generation} revision={page.revision}
+              openAgent={openAgent} close={close} />}
+          </Dropdown>
         </div>
         <select aria-label="搜索范围" value={scope} onChange={event => setScope(event.currentTarget.value as typeof scope)}>
           <option value="loaded">已加载摘要</option><option value="all">全会话</option>
@@ -287,8 +290,6 @@ export function Trajectory({ id, page, active, working, fault, fetchPage, openAg
       </div>
     </section>
     {statistics && active ? <Statistics id={id} revision={page.revision} /> : null}
-    {showAgents ? <AgentDirectory id={id} generation={page.generation} revision={page.revision} active={active}
-      openAgent={openAgent} /> : null}
     {scope === 'all' && active ? <SessionSearch key={JSON.stringify([page.generation, query, tool, errorsOnly])} id={id}
       generation={page.generation} term={query} tool={tool}
       errors={errorsOnly} select={jump} disabled={working} /> : null}

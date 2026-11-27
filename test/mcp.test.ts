@@ -87,6 +87,13 @@ test('panel reads the same summaries and detailed sources through app-only priva
   assert.equal(panel.structuredContent, undefined);
   assert.ok(!JSON.stringify(panel.content).includes(fixturePrivateOutput));
   const source = standalone.events[0].source;
+  const meta = await calls(new URL(path + '/meta', 'http://127.0.0.1'));
+  assert.deepEqual(meta, {
+    id: session, name: null, kind: 'thread', parentId: null, agentPath: null, agentRole: null,
+    date: '2026-11-27T10-11-12', archived: false,
+  });
+  const panelMeta = await read(path + '/meta');
+  assert.deepEqual(panelMeta._meta?.trajectoryResponse, { data: meta });
   const query = new URLSearchParams({ offset: String(source.offset), length: String(source.length), from: '0', digest: source.digest, field: 'content' });
   const detail = await read(`${path}/detail?${query}`);
   assert.deepEqual(detail._meta?.trajectoryResponse, { data: { text: fixturePrivateOutput, next: null } });

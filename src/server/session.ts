@@ -34,7 +34,12 @@ function list(value: unknown): unknown[] {
   return Array.isArray(value) ? value : [];
 }
 
-export async function findSession(home: string, id: string): Promise<string> {
+export interface SessionLocation {
+  path: string;
+  archived: boolean;
+}
+
+export async function locateSession(home: string, id: string): Promise<SessionLocation> {
   if (!SESSION_ID.test(id)) throw new RequestError(400, '会话 ID 必须是 UUID。');
   const suffix = '-' + id.toLowerCase() + '.jsonl';
   async function find(directory: string): Promise<string | undefined> {
@@ -53,9 +58,15 @@ export async function findSession(home: string, id: string): Promise<string> {
       if (match !== undefined) return match;
     }
   }
-  const path = await find(join(home, 'sessions')) ?? await find(join(home, 'archived_sessions'));
-  if (path === undefined) throw new RequestError(404, '找不到指定会话。');
-  return path;
+  const live = await find(join(home, 'sessions'));
+  if (live !== undefined) return { path: live, archived: false };
+  const archived = await find(join(home, 'archived_sessions'));
+  if (archived !== undefined) return { path: archived, archived: true };
+  throw new RequestError(404, '找不到指定会话。');
+}
+
+export async function findSession(home: string, id: string): Promise<string> {
+  return (await locateSession(home, id)).path;
 }
 
 export async function readBytes(file: FileHandle, offset: number, length: number): Promise<Buffer> {
@@ -105,6 +116,20 @@ export function parse(bytes: Buffer): RecordValue | null {
     return typeof object(parsed).type === 'string' ? object(parsed) : null;
   } catch {
     return null;
+  }
+}
+
+/** Read only the first record of a rollout, used for names and agent identity. */
+export async function readHead(path: string): Promise<RecordValue | null> {
+  const file = await open(path, 'r');
+  try {
+    const buffer = Buffer.allocUnsafe(CHUNK_BYTES);
+    const { bytesRead } = await file.read(buffer, 0, buffer.length, 0);
+    const bytes = buffer.subarray(0, bytesRead);
+    const end = bytes.indexOf(10);
+    return parse(end < 0 ? bytes : bytes.subarray(0, end));
+  } finally {
+    await file.close();
   }
 }
 
@@ -167,9 +192,20 @@ export function outputExitCode(output: unknown): number | undefined {
   return code === undefined ? undefined : Number(code);
 }
 
-export function agentLink(value: unknown, label?: string): AgentLink {
+export function agentLink(
+  value: unknown,
+  label?: string,
+  extra?: { name?: string; path?: string; role?: string },
+): AgentLink {
   const id = string(value);
-  return { id: id && SESSION_ID.test(id) ? id.toLowerCase() : null, label: label || id || '子代理不可定位' };
+  const link: AgentLink = {
+    id: id && SESSION_ID.test(id) ? id.toLowerCase() : null,
+    label: label || id || '子代理不可定位',
+  };
+  if (extra?.name) link.name = extra.name;
+  if (extra?.path) link.path = extra.path;
+  if (extra?.role) link.role = extra.role;
+  return link;
 }
 
 export function completedItem(payload: RecordValue) {
@@ -249,9 +285,11 @@ export function describe(record: RecordValue): {
   if (type === 'event_msg') {
     const item = completedItem(payload);
     if (item.type === 'SubAgentActivity' || item.type === 'sub_agent_activity') {
+      const path = string(item.agent_path);
+      const name = string(item.agent_nickname);
       return { kind: 'agent', label: item.kind === 'started' ? '派发子代理' : '子代理活动',
         content: text(item.kind), callId: string(item.id),
-        agents: [agentLink(item.agent_thread_id, string(item.agent_path))] };
+        agents: [agentLink(item.agent_thread_id, path, { ...(name ? { name } : {}), ...(path ? { path } : {}) })] };
     }
     if (item.type === 'CollabAgentToolCall' || item.type === 'collab_agent_tool_call') {
       const agents = list(item.receiver_thread_ids).map(id => agentLink(id));
@@ -267,8 +305,9 @@ export function describe(record: RecordValue): {
         state: outputState(payload, payload) };
     }
     if (subtype === 'collab_agent_spawn_end' || subtype === 'collab_waiting_end') {
+      const name = string(payload.new_agent_nickname);
       const agents = subtype === 'collab_agent_spawn_end'
-        ? [agentLink(payload.new_thread_id, string(payload.new_agent_nickname))]
+        ? [agentLink(payload.new_thread_id, name, { ...(name ? { name } : {}) })]
         : Object.keys(object(payload.statuses)).map(id => agentLink(id));
       return { kind: 'agent', label: subtype === 'collab_agent_spawn_end' ? '派发子代理' : '子代理等待结果',
         content: text(payload.status ?? payload.statuses), callId: string(payload.call_id), agents };
