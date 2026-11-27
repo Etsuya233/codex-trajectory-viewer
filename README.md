@@ -21,6 +21,7 @@ M2 提供日常使用的本地网页。打开 Codex 会话即可查看最近 50 
 | [docs/M2-VALIDATION.md](docs/M2-VALIDATION.md) | M2 索引和日志语义、浏览器验收及性能实测 |
 | [docs/AUTO-HISTORY-VALIDATION.md](docs/AUTO-HISTORY-VALIDATION.md) | 自动翻页、子代理目录和按需详情验证 |
 | [docs/M3-VALIDATION.md](docs/M3-VALIDATION.md) | Desktop 安装、协议实测和原生验收状态 |
+| [docs/HTTP-MCP-VALIDATION.md](docs/HTTP-MCP-VALIDATION.md) | 独立 HTTP 后台的双聊天隔离验证 |
 | [references/README.md](references/README.md) | DSH 参考源码导航与更新方式 |
 | `references/deepseek-harness/` | 固定提交的上游完整源码，Git submodule |
 
@@ -76,6 +77,31 @@ codex plugin add local-trajectory-viewer@local-trajectory
 在本地聊天右侧新标签页点「打开」旁的「…」，选择「本地 Codex 轨迹」。旧版界面从 **+ → More tools… → Plugins and MCPs** 进入。如果宿主当前提供了有效聊天 UUID，面板打开该聊天。身份缺失或无效时，从会话选择器明确打开目标。打开工具 `show_local_trajectory_viewer` 也可以请求显示查看器。
 
 打包目录 `dist/desktop-marketplace` 包含插件清单、MCP 启动配置、已打包的 stdio 服务与自包含面板资源。安装后直接由 Desktop 启动服务。独立网页仍可通过 `npm start` 使用。原生入口实测进度见 [M3 验证记录](docs/M3-VALIDATION.md)。
+
+## 独立 HTTP MCP 后台
+
+打包同时生成 `http-server.mjs`。一个后台可以供多条 Codex 聊天直接连接，并共享会话索引。已在隔离 app-server 验证工具、UI 资源和线程绑定。Desktop 图形界面的原生侧栏入口仍待验收。
+
+执行 `npm run package:desktop`，然后进入 `dist/desktop-marketplace/plugins/local-trajectory-viewer`。可将整个目录复制到本机固定位置运行，所需资源和 JavaScript 依赖已包含在包内。
+
+```powershell
+node .\http-server.mjs config
+node .\http-server.mjs start
+```
+
+`config` 只打印配置片段路径。用本机编辑器打开该文件，将 `[mcp_servers.local_trajectory_http]` 整段加入本机 Codex `config.toml`。片段包含本机 bearer 凭据，通过 `http_headers.Authorization` 交给 app-server。请勿把片段或同目录的 `token` 纳入版本控制、插件包或日志。该配置注册一个独立 MCP server。插件的来源标识及侧栏行为仍需在 Desktop 中测试。
+
+后台默认监听 `127.0.0.1:4381`。如需换端口，先设置 `TRAJECTORY_HTTP_PORT`，再用同一设置生成配置和启动后台。`CODEX_HOME` 指定日志目录。Windows 凭据默认存放于 `%LOCALAPPDATA%\CodexTrajectoryViewer`，其他平台使用 `~/.codex/trajectory-http`。如需自定义，设置 `TRAJECTORY_HTTP_STATE_DIR` 指向当前用户控制的新目录。后台会检查已有目录和凭据权限。
+
+前台后台可以用 Ctrl+C 停止。Windows 上也可用已打包的脚本隐藏启动，终端可以关闭。
+
+```powershell
+.\start-trajectory-http.ps1
+node .\http-server.mjs status
+node .\http-server.mjs stop
+```
+
+`stop` 向已认证的后台发送退出请求，后台最多等待五秒关闭在途 HTTP 连接。重启沿用端口和凭据即可。要回到默认 stdio 入口，移除本机添加的 HTTP MCP 配置并停止后台。默认插件的 `mcp.json` 仍使用 stdio。
 
 ## 上游版权
 

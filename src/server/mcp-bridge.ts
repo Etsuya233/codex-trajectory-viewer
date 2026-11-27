@@ -63,8 +63,12 @@ function panelContext(context: PanelContext, open: boolean): CallToolResult {
   };
 }
 
-export function createMcpBridge(codexHome: string, readHtml: () => Promise<string>) {
-  const read = createTrajectoryApi(codexHome);
+export function createMcpBridge(
+  codexHome: string,
+  readHtml: () => Promise<string>,
+  read = createTrajectoryApi(codexHome),
+  requestSignal?: AbortSignal,
+) {
   const server = new Server({ name: 'local-trajectory-viewer', version: '1.0.0' }, {
     capabilities: { tools: {}, resources: {} },
   });
@@ -89,7 +93,8 @@ export function createMcpBridge(codexHome: string, readHtml: () => Promise<strin
       throw new McpError(ErrorCode.InvalidParams, '只支持查看器的本地读取路径。');
     }
     try {
-      return panelData({ data: await read(new URL(path, 'http://trajectory.invalid'), signal) });
+      const readSignal = requestSignal ? AbortSignal.any([signal, requestSignal]) : signal;
+      return panelData({ data: await read(new URL(path, 'http://trajectory.invalid'), readSignal) });
     } catch (error) {
       return panelData({ error: error instanceof RequestError ? error.message : '无法读取本地会话，请重试。' });
     }

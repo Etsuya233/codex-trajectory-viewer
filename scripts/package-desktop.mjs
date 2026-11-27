@@ -21,7 +21,9 @@ const html = shell.replace('<head>', '<head><meta name="trajectory-transport" co
   .replace(styleTag[0], () => `<style>${styles.replace(/<\/style/gi, '<\\/style')}</style>`);
 
 const { metafile } = await build({
-  absWorkingDir: repo, entryPoints: ['src/server/mcp.ts'], outfile: join(plugin, 'server.mjs'),
+  absWorkingDir: repo,
+  entryPoints: { server: 'src/server/mcp.ts', 'http-server': 'src/server/mcp-http-main.ts' },
+  outdir: plugin, outExtension: { '.js': '.mjs' },
   platform: 'node', format: 'esm', target: 'node24', bundle: true, minify: true, metafile: true,
   legalComments: 'eof',
   banner: { js: 'import { createRequire } from "node:module"; const require = createRequire(import.meta.url);' },
@@ -32,6 +34,7 @@ await Promise.all([
   copyFile(join(repo, 'desktop', 'marketplace.json'), join(catalog, 'marketplace.json')),
   copyFile(join(repo, 'desktop', 'plugin.json'), join(plugin, 'plugin.json')),
   copyFile(join(repo, 'desktop', 'mcp.json'), join(plugin, 'mcp.json')),
+  copyFile(join(repo, 'scripts', 'start-trajectory-http.ps1'), join(plugin, 'start-trajectory-http.ps1')),
   copyFile(join(repo, 'src', 'client', 'dsh', 'LICENSE'), join(licenses, 'DeepSeek-Harness.txt')),
   copyFile(join(browser, 'browser-licenses.md'), join(licenses, 'browser.md')),
 ]);
