@@ -8,7 +8,15 @@ export function queryUrl(path: string, values: Record<string, string | number | 
   return path + '?' + query;
 }
 
+type PanelReader = (path: string, signal: AbortSignal) => Promise<unknown>;
+let panelReader: PanelReader | undefined;
+
+export function setPanelReader(read: PanelReader) {
+  panelReader = read;
+}
+
 export async function request<T>(url: string, signal: AbortSignal): Promise<T> {
+  if (panelReader) return await panelReader(url, signal) as T;
   const response = await fetch(url, { signal });
   const body = await response.json();
   if (!response.ok) throw new Error(body.error ?? '无法加载本地轨迹。');

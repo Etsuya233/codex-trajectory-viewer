@@ -27,14 +27,20 @@ function storeStack(stack: string[]) {
   history.pushState({ trajectoryStack: stack }, '', url);
 }
 
-export function App() {
-  const [stack, setStack] = useState(currentStack);
+interface AppProps {
+  embedded?: boolean;
+  hostSession?: string;
+}
+
+export function App({ embedded = false, hostSession }: AppProps) {
+  const [stack, setStack] = useState(() => embedded ? hostSession ? [hostSession] : [] : currentStack());
   const id = stack.at(-1) ?? '';
   const [input, setInput] = useState(id);
-  const [picker, setPicker] = useState(false);
+  const [picker, setPicker] = useState(embedded && !hostSession);
   const [reload, setReload] = useState(0);
 
   useEffect(() => {
+    if (embedded) return;
     const navigate = () => {
       const next = currentStack();
       setStack(next);
@@ -43,10 +49,10 @@ export function App() {
     };
     window.addEventListener('popstate', navigate);
     return () => window.removeEventListener('popstate', navigate);
-  }, []);
+  }, [embedded]);
 
   function navigate(next: string[]) {
-    storeStack(next);
+    if (!embedded) storeStack(next);
     setStack(next);
     setInput(next.at(-1) ?? '');
     setPicker(false);
@@ -73,14 +79,15 @@ export function App() {
 
   function backToParent() {
     if (stack.length > 1) {
-      // A restored browser history entry can still go back to its preceding parent.
-      history.back();
+      if (embedded) navigate(stack.slice(0, -1));
+      else history.back();
     }
   }
 
   return <main className="shell">
     <header className="session-bar">
       <h1>Codex 轨迹</h1>
+      {embedded && hostSession && id === hostSession ? <span className="record-count">当前聊天</span> : null}
       {stack.length > 1 ? <button type="button" onClick={backToParent}>返回父会话</button> : null}
       <form onSubmit={submit} aria-label="打开会话">
         <input value={input} onChange={event => setInput(event.currentTarget.value)} placeholder="会话 ID"

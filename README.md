@@ -20,6 +20,7 @@ M2 提供日常使用的本地网页。打开 Codex 会话即可查看最近 50 
 | [docs/M1-VALIDATION.md](docs/M1-VALIDATION.md) | M1 浏览器验证、性能实测、DSH 依赖与适配差异 |
 | [docs/M2-VALIDATION.md](docs/M2-VALIDATION.md) | M2 索引和日志语义、浏览器验收及性能实测 |
 | [docs/AUTO-HISTORY-VALIDATION.md](docs/AUTO-HISTORY-VALIDATION.md) | 自动翻页、子代理目录和按需详情验证 |
+| [docs/M3-VALIDATION.md](docs/M3-VALIDATION.md) | Desktop 安装、协议实测和原生验收状态 |
 | [references/README.md](references/README.md) | DSH 参考源码导航与更新方式 |
 | `references/deepseek-harness/` | 固定提交的上游完整源码，Git submodule |
 
@@ -57,7 +58,24 @@ npm start
 
 服务默认在 `~/.codex/sessions` 和 `~/.codex/archived_sessions` 按文件名定位会话。可以通过 `CODEX_HOME` 指定日志根目录，通过 `TRAJECTORY_PORT` 指定端口。服务只在 IPv4 回环地址 `127.0.0.1` 监听，以只读方式访问指定会话。
 
-React + TypeScript 前端使用 Vite 构建。Node.js 服务保留可重建的内存索引。服务重启后首次访问会先显示尾部预览，再补齐索引。可执行 `npm run typecheck` 和 `npm test` 验证项目。Codex Desktop 原生面板与当前聊天绑定属于 M3。
+React + TypeScript 前端使用 Vite 构建。Node.js 服务保留可重建的内存索引。服务重启后首次访问会先显示尾部预览，再补齐索引。可执行 `npm run typecheck` 和 `npm test` 验证项目。
+
+## Codex Desktop 插件
+
+在仓库目录执行以下命令。插件运行需要 Node.js 24 或更新版本在 Desktop 本地执行器的 PATH 中。
+
+```sh
+npm ci
+npm run package:desktop
+codex plugin marketplace add ./dist/desktop-marketplace
+codex plugin add local-trajectory-viewer@local-trajectory
+```
+
+安装或更新后，如果当前窗口未出现新插件入口，请完全退出并重新启动 Codex Desktop。本机验证中需要重启才能加载新入口。
+
+在本地聊天右侧新标签页点「打开」旁的「…」，选择「本地 Codex 轨迹」。旧版界面从 **+ → More tools… → Plugins and MCPs** 进入。如果宿主当前提供了有效聊天 UUID，面板打开该聊天。身份缺失或无效时，从会话选择器明确打开目标。打开工具 `show_local_trajectory_viewer` 也可以请求显示查看器。
+
+打包目录 `dist/desktop-marketplace` 包含插件清单、MCP 启动配置、已打包的 stdio 服务与自包含面板资源。安装后直接由 Desktop 启动服务。独立网页仍可通过 `npm start` 使用。原生入口实测进度见 [M3 验证记录](docs/M3-VALIDATION.md)。
 
 ## 上游版权
 

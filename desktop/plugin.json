@@ -1,0 +1,16 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "local-trajectory-viewer",
+  "version": "1.0.0",
+  "description": "在 Codex Desktop 面板中查看本地聊天的历史轨迹、工具和子代理。",
+  "extensions": {
+    "com.openai": {
+      "requires_local_executor": true,
+      "interface": {
+        "displayName": "本地 Codex 轨迹",
+        "shortDescription": "浏览本机 Codex 聊天轨迹。",
+        "category": "Developer Tools"
+      }
+    }
+  }
+}

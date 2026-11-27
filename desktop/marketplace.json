@@ -1,0 +1,12 @@
+{
+  "name": "local-trajectory",
+  "interface": { "displayName": "本地轨迹查看器" },
+  "plugins": [
+    {
+      "name": "local-trajectory-viewer",
+      "source": { "source": "local", "path": "./plugins/local-trajectory-viewer" },
+      "policy": { "installation": "AVAILABLE", "authentication": "ON_INSTALL" },
+      "category": "Developer Tools"
+    }
+  ]
+}

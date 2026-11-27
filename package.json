@@ -3,15 +3,20 @@
   "version": "1.0.0",
   "description": "在 Codex Desktop 内查看聊天轮次、工具调用与结果、已保存的思考摘要和执行时间线的本地轨迹查看器。",
   "private": true,
-  "engines": { "node": ">=24.0.0" },
+  "engines": {
+    "node": ">=24.0.0"
+  },
   "scripts": {
     "build": "vite build --outDir dist/viewer",
     "start": "node src/server/main.ts",
+    "package:desktop": "npm run build && vite build --mode mcp --outDir dist/panel && node scripts/package-desktop.mjs",
     "typecheck": "tsc --noEmit",
     "test": "node --test \"test/*.test.ts\""
   },
   "type": "module",
   "dependencies": {
+    "@modelcontextprotocol/ext-apps": "^2.0.4",
+    "@modelcontextprotocol/sdk": "^1.32.2",
     "react": "^19.3.1",
     "react-dom": "^19.3.1"
   },
@@ -19,6 +24,7 @@
     "@types/node": "^26.6.11",
     "@types/react": "^19.3.3",
     "@types/react-dom": "^19.3.0",
+    "esbuild": "^0.28.2",
     "typescript": "^7.0.2",
     "vite": "^8.4.0"
   }
