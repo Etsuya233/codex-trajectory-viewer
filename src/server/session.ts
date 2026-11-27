@@ -2,10 +2,10 @@ import { createHash } from 'node:crypto';
 import { readdir, open } from 'node:fs/promises';
 import type { FileHandle } from 'node:fs/promises';
 import { join } from 'node:path';
-import type { DetailField, DetailPage, Source, ToolState, TrajectoryEvent, TrajectoryPage } from '../model.ts';
+import type { AgentLink, DetailField, DetailPage, Source, ToolState, TrajectoryEvent, TrajectoryPage } from '../model.ts';
 
-const SESSION_ID = /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i;
-const CHUNK_BYTES = 64 * 1024;
+export const SESSION_ID = /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i;
+export const CHUNK_BYTES = 64 * 1024;
 const SCAN_BYTES = 8 * 1024 * 1024;
 const PREVIEW_CHARS = 180;
 const DETAIL_CHARS = 32 * 1024;
@@ -20,13 +20,13 @@ export class RequestError extends Error {
   }
 }
 
-type RecordValue = Record<string, unknown>;
+export type RecordValue = Record<string, unknown>;
 
-function object(value: unknown): RecordValue {
+export function object(value: unknown): RecordValue {
   return value !== null && typeof value === 'object' && !Array.isArray(value) ? value as RecordValue : {};
 }
 
-function string(value: unknown): string | undefined {
+export function string(value: unknown): string | undefined {
   return typeof value === 'string' ? value : undefined;
 }
 
@@ -58,7 +58,7 @@ export async function findSession(home: string, id: string): Promise<string> {
   return path;
 }
 
-async function readBytes(file: FileHandle, offset: number, length: number): Promise<Buffer> {
+export async function readBytes(file: FileHandle, offset: number, length: number): Promise<Buffer> {
   const buffer = Buffer.allocUnsafe(length);
   let filled = 0;
   while (filled < length) {
@@ -99,7 +99,7 @@ async function* recentLines(file: FileHandle, size: number) {
   }
 }
 
-function parse(bytes: Buffer): RecordValue | null {
+export function parse(bytes: Buffer): RecordValue | null {
   try {
     const parsed: unknown = JSON.parse(bytes.toString('utf8'));
     return typeof object(parsed).type === 'string' ? object(parsed) : null;
@@ -108,7 +108,7 @@ function parse(bytes: Buffer): RecordValue | null {
   }
 }
 
-function sourceFor(offset: number, bytes: Buffer): Source {
+export function sourceFor(offset: number, bytes: Buffer): Source {
   return { offset, length: bytes.length, digest: createHash('sha256').update(bytes).digest('hex') };
 }
 
@@ -128,17 +128,59 @@ function preview(value: string): string {
   return value.length > PREVIEW_CHARS ? trimmed.slice(0, PREVIEW_CHARS) + '…' : trimmed;
 }
 
+function outputText(output: unknown) {
+  return typeof output === 'string' ? output : textBlocks(output, ['input_text', 'output_text', 'text']);
+}
+
+export function outputObject(output: unknown): RecordValue {
+  return typeof output === 'string' || Array.isArray(output) ? parseOutputObject(outputText(output)) : object(output);
+}
+
+function processHeader(output: unknown) {
+  const body = outputText(output).slice(0, 4096);
+  return body.startsWith('Chunk ID:') ? body.split(/\r?\n(?:Original token count:|Final output:|Output:)/, 1)[0] : '';
+}
+
+export function processId(value: unknown): string | undefined {
+  return typeof value === 'number' && Number.isSafeInteger(value) ? String(value) : string(value);
+}
+
 function outputState(output: unknown, payload: RecordValue): ToolState {
-  const metadata = object(output);
-  const structured = typeof output === 'string' ? parseOutputObject(output) : metadata;
-  const body = (typeof output === 'string' ? output : textBlocks(output, ['input_text'])).slice(0, 4096);
-  const header = body.startsWith('Chunk ID:') ? body.split(/\r?\n(?:Original token count:|Final output:|Output:)/, 1)[0] : '';
+  const structured = outputObject(output);
+  const header = processHeader(output);
   if (payload.is_error === true || structured.isError === true || structured.is_error === true
     || (typeof structured.exit_code === 'number' && structured.exit_code !== 0)
     || /^Process exited with code -?[1-9]\d*\b/m.test(header)) return 'error';
   if (typeof structured.session_id === 'number' || typeof structured.session_id === 'string'
     || /^Process running with session ID \S+/m.test(header)) return 'running';
   return 'returned';
+}
+
+export function outputProcessId(output: unknown): string | undefined {
+  return processId(outputObject(output).session_id) ?? /^Process running with session ID (\S+)/m.exec(processHeader(output))?.[1];
+}
+
+export function outputExitCode(output: unknown): number | undefined {
+  const value = outputObject(output).exit_code;
+  if (typeof value === 'number' && Number.isSafeInteger(value)) return value;
+  const code = /^Process exited with code (-?\d+)\b/m.exec(processHeader(output))?.[1];
+  return code === undefined ? undefined : Number(code);
+}
+
+export function agentLink(value: unknown, label?: string): AgentLink {
+  const id = string(value);
+  return { id: id && SESSION_ID.test(id) ? id.toLowerCase() : null, label: label || id || '子代理不可定位' };
+}
+
+export function completedItem(payload: RecordValue) {
+  if (payload.type === 'item_completed') return object(payload.item);
+  if (payload.type === 'sub_agent_activity') return payload;
+  return {};
+}
+
+export function completedCommand(payload: RecordValue) {
+  const item = completedItem(payload);
+  return item.type === 'CommandExecution' || item.type === 'command_execution' ? item : null;
 }
 
 function parseOutputObject(value: string): RecordValue {
@@ -158,10 +200,21 @@ const internalEvents = new Set([
   'user_message', 'agent_message', 'agent_reasoning', 'agent_reasoning_raw_content',
 ]);
 
-function describe(record: RecordValue): { kind: TrajectoryEvent['kind']; label: string; content: string; callId?: string; state?: ToolState } | null {
+export function describe(record: RecordValue): {
+  kind: TrajectoryEvent['kind']; label: string; content: string; callId?: string; state?: ToolState; agents?: AgentLink[];
+} | null {
   const type = string(record.type) ?? 'unknown';
   const payload = object(record.payload);
   const subtype = string(payload.type) ?? type;
+  if (type === 'session_meta') {
+    const base = object(payload.history_base);
+    const parent = string(payload.forked_from_id) ?? string(base.thread_id);
+    const ref = base.thread_id ? '历史引用 · ' : '';
+    return parent || payload.subagent_history_start_ordinal !== undefined
+      ? { kind: 'inheritance', label: '继承历史',
+        content: `${ref}来源会话 ${parent ?? '未知'}，继承边界 ${payload.subagent_history_start_ordinal ?? payload.forked_from_ordinal_exclusive ?? base.end_ordinal_exclusive ?? '未知'}` }
+      : null;
+  }
   if (housekeeping.has(type)) return null;
   if (type === 'response_item') {
     const callId = string(payload.call_id);
@@ -194,12 +247,71 @@ function describe(record: RecordValue): { kind: TrajectoryEvent['kind']; label: 
     kind: 'compaction', label: '上下文压缩', content: string(payload.message) ?? '',
   };
   if (type === 'event_msg') {
+    const item = completedItem(payload);
+    if (item.type === 'SubAgentActivity' || item.type === 'sub_agent_activity') {
+      return { kind: 'agent', label: item.kind === 'started' ? '派发子代理' : '子代理活动',
+        content: text(item.kind), callId: string(item.id),
+        agents: [agentLink(item.agent_thread_id, string(item.agent_path))] };
+    }
+    if (item.type === 'CollabAgentToolCall' || item.type === 'collab_agent_tool_call') {
+      const agents = list(item.receiver_thread_ids).map(id => agentLink(id));
+      return { kind: 'agent', label: item.tool === 'wait' ? '子代理等待结果' : '子代理协作',
+        content: text(item.agents_states ?? item.status), callId: string(item.id), agents };
+    }
+    const command = completedCommand(payload);
+    if (command) return { kind: 'tool', label: 'exec_command', content: text(command.command), callId: string(command.id) };
     if (internalEvents.has(subtype)) return null;
+    if (subtype === 'exec_command_end' && outputExitCode(payload) !== undefined) {
+      return { kind: 'result', label: '进程退出',
+        content: text(payload.aggregated_output ?? payload.stdout ?? payload.stderr), callId: string(payload.call_id),
+        state: outputState(payload, payload) };
+    }
+    if (subtype === 'collab_agent_spawn_end' || subtype === 'collab_waiting_end') {
+      const agents = subtype === 'collab_agent_spawn_end'
+        ? [agentLink(payload.new_thread_id, string(payload.new_agent_nickname))]
+        : Object.keys(object(payload.statuses)).map(id => agentLink(id));
+      return { kind: 'agent', label: subtype === 'collab_agent_spawn_end' ? '派发子代理' : '子代理等待结果',
+        content: text(payload.status ?? payload.statuses), callId: string(payload.call_id), agents };
+    }
     if (subtype === 'error' || subtype === 'stream_error') return {
       kind: 'error', label: '错误', content: text(payload.message ?? payload.error),
     };
   }
   return { kind: 'unknown', label: subtype, content: '' };
+}
+
+export function eventFor(record: RecordValue | null, offset: number, bytes: Buffer, turn: string | null): TrajectoryEvent | null {
+  const description = record === null
+    ? { kind: 'unknown' as const, label: '无法解析的记录', content: '' }
+    : describe(record);
+  if (description === null) return null;
+  const event: TrajectoryEvent = {
+    source: sourceFor(offset, bytes), kind: description.kind, label: description.label,
+    preview: preview(description.content), timestamp: string(record?.timestamp) ?? null, turn,
+    callId: description.callId, agents: description.agents,
+  };
+  if (record === null) event.problem = '完整行无法按 Codex JSONL 解析。';
+  if (description.kind === 'result') {
+    const payload = object(record?.payload);
+    const output = payload.type === 'exec_command_end' ? payload : payload.output ?? payload.result;
+    event.result = { source: event.source, preview: event.preview, status: description.state ?? 'returned',
+      processId: outputProcessId(output), exitCode: outputExitCode(output) };
+  }
+  const command = completedCommand(object(record?.payload));
+  if (command) {
+    const exitCode = outputExitCode(command);
+    const result = string(command.aggregated_output) ?? '';
+    event.result = {
+      source: event.source, preview: preview(result), status: command.status === 'failed' ? 'error' : outputState(command, command),
+      processId: processId(command.process_id), exitCode, detailField: 'result',
+    };
+    const duration = object(command.duration);
+    if (typeof duration.secs === 'number' && typeof duration.nanos === 'number') {
+      const milliseconds = 1000 * duration.secs + duration.nanos / 1_000_000;
+      if (milliseconds >= 0 && Number.isFinite(milliseconds)) event.durationMs = milliseconds;
+    }
+  }
+  return event;
 }
 
 export async function readRecent(path: string): Promise<TrajectoryPage> {
@@ -231,33 +343,20 @@ export async function readRecent(path: string): Promise<TrajectoryPage> {
         }
       }
       if (events.length >= PAGE_EVENTS && omitted) continue;
-      const description = record === null
-        ? { kind: 'unknown' as const, label: '无法解析的记录', content: '' }
-        : describe(record);
-      if (description === null) continue;
+      const event = eventFor(record, line.offset, line.bytes, turn);
+      if (event === null) continue;
       if (events.length >= PAGE_EVENTS) {
         omitted = true;
         continue;
       }
-      const event: TrajectoryEvent = {
-        source: sourceFor(line.offset, line.bytes),
-        kind: description.kind,
-        label: description.label,
-        preview: preview(description.content),
-        timestamp: string(record?.timestamp) ?? null,
-        turn,
-        callId: description.callId,
-      };
-      if (record === null) event.problem = '完整行无法按 Codex JSONL 解析。';
-      if (description.kind === 'result') {
-        if (description.callId && !pendingResults.has(description.callId)) pendingResults.set(description.callId, event);
-        event.result = { source: event.source, preview: event.preview, status: description.state ?? 'returned' };
+      if (event.kind === 'result') {
+        if (event.callId && !pendingResults.has(event.callId)) pendingResults.set(event.callId, event);
       }
-      if (description.kind === 'tool' && description.callId) {
-        const response = pendingResults.get(description.callId);
+      if (event.kind === 'tool' && event.callId) {
+        const response = pendingResults.get(event.callId);
         if (response) {
           event.result = response.result;
-          pendingResults.delete(description.callId);
+          pendingResults.delete(event.callId);
           events.splice(events.indexOf(response), 1);
         }
       }
@@ -280,7 +379,10 @@ export async function readDetail(path: string, source: Source, field: DetailFiel
       throw new RequestError(409, '记录已变化，请重新打开会话。');
     }
     const record = parse(bytes);
-    const content = field === 'raw' ? bytes.toString('utf8').trimEnd() : record ? describe(record)?.content ?? '' : '';
+    const command = completedCommand(object(record?.payload));
+    const content = field === 'raw' ? bytes.toString('utf8').trimEnd()
+      : field === 'result' ? string(command?.aggregated_output) ?? ''
+        : record ? describe(record)?.content ?? '' : '';
     if (from > content.length) throw new RequestError(400, '详情位置超出范围。');
     let end = Math.min(content.length, from + DETAIL_CHARS);
     if (end < content.length && /[\uD800-\uDBFF]/.test(content[end - 1])) end--;
@@ -290,4 +392,4 @@ export async function readDetail(path: string, source: Source, field: DetailFiel
   }
 }
 
-export const detailSourceLimit = SCAN_BYTES;
+export const detailSourceLimit = 64 * 1024 * 1024;
