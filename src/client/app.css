@@ -1,0 +1,140 @@
+body {
+  --ds-font-family-code: Consolas, "SFMono-Regular", monospace;
+  --dsw-font-xxxs-11: 400 11px/16px system-ui, sans-serif;
+  --dsw-font-xxs-12: 400 12px/17px system-ui, sans-serif;
+  --dsw-font-xs-13: 400 13px/19px system-ui, sans-serif;
+  --dsh-trajectory-toolbar-height: 31px;
+  --ds-ease-in-out: ease-in-out;
+  margin: 0;
+  background: var(--dsw-alias-bg-layer-1);
+  color: var(--dsw-alias-label-primary);
+  font: var(--dsw-font-xs-13);
+}
+
+* { box-sizing: border-box; }
+
+input, button { font: inherit; }
+
+button { cursor: pointer; }
+
+:focus-visible {
+  outline: 2px solid var(--dsw-alias-state-business-primary);
+  outline-offset: 1px;
+}
+
+.shell {
+  display: flex;
+  flex-direction: column;
+  height: 100dvh;
+  width: 100%;
+}
+
+.session-bar {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px 16px;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--dsw-alias-border-l2);
+}
+
+.session-bar h1 {
+  font: 600 14px/20px system-ui, sans-serif;
+  margin: 0;
+}
+
+.session-bar form {
+  display: flex;
+  gap: 5px;
+  align-items: center;
+  max-width: 100%;
+  flex: 1;
+}
+
+.session-bar input, .trajectory-search {
+  min-width: 0;
+  padding: 3px 7px;
+  flex: 1;
+  max-width: 305px;
+  color: inherit;
+  background: var(--dsw-alias-bg-layer-1);
+  border: 1px solid var(--dsw-alias-border-l2);
+  border-radius: var(--dsw-radius-xs, 4px);
+}
+
+.session-bar input { font: 12px/17px var(--ds-font-family-code); }
+
+.session-bar button, .payload button, .empty button {
+  padding: 3px 8px;
+  color: inherit;
+  background: var(--dsw-alias-bg-layer-2);
+  border: 1px solid var(--dsw-alias-border-l2);
+  border-radius: var(--dsw-radius-xs, 4px);
+}
+
+.trajectory-search {
+  padding-block: 1px;
+  max-width: 225px;
+  min-width: 120px;
+  font: var(--dsw-font-xxs-12);
+}
+
+.record-count, .turn-count, .history-note {
+  color: var(--dsw-alias-label-secondary);
+  font: var(--dsw-font-xxxs-11);
+}
+
+.history-note { text-align: center; }
+
+.turn-heading { background: var(--dsw-alias-bg-layer-2); }
+
+.turn-heading button {
+  background: transparent;
+  border: none;
+  color: var(--dsw-alias-label-secondary);
+  font: 11px/20px var(--ds-font-family-code);
+}
+
+.turn-heading button:hover { color: var(--dsw-alias-state-business-primary); }
+.turn-count { margin-inline-start: 7px; }
+
+.record-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  padding: 6px 12px;
+  gap: 4px 12px;
+  color: var(--dsw-alias-label-secondary);
+  font: var(--dsw-font-xxs-12);
+}
+
+.payload {
+  flex: 1;
+  min-height: 0;
+  min-width: 0;
+  overflow: auto;
+  padding: 0 12px 12px;
+}
+
+.payload pre {
+  margin: 10px 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font: 12px/18px var(--ds-font-family-code);
+}
+
+.empty {
+  padding: 5px 12px;
+  color: var(--dsw-alias-label-secondary);
+}
+
+@media (max-width: 620px) {
+  aside[aria-label="记录详情"] {
+    position: absolute;
+    inset: 0 0 0 auto;
+    z-index: 8;
+    width: min(100%, 420px);
+    max-width: none;
+    box-shadow: 0 0 18px #0002;
+  }
+}

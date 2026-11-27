@@ -1,0 +1,25 @@
+{
+  "name": "codex-trajectory-viewer",
+  "version": "1.0.0",
+  "description": "在 Codex Desktop 内查看聊天轮次、工具调用与结果、已保存的思考摘要和执行时间线的本地轨迹查看器。",
+  "private": true,
+  "engines": { "node": ">=24.0.0" },
+  "scripts": {
+    "build": "vite build",
+    "start": "node src/server/main.ts",
+    "typecheck": "tsc --noEmit",
+    "test": "node --test \"test/*.test.ts\""
+  },
+  "type": "module",
+  "dependencies": {
+    "react": "^19.3.1",
+    "react-dom": "^19.3.1"
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.11",
+    "@types/react": "^19.3.3",
+    "@types/react-dom": "^19.3.0",
+    "typescript": "^7.0.2",
+    "vite": "^8.4.0"
+  }
+}

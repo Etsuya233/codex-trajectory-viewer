@@ -2,7 +2,7 @@
 
 在 Codex Desktop 内查看聊天轮次、工具调用与结果、已保存的思考摘要和执行时间线的本地轨迹查看器。
 
-项目处于需求与初始化阶段，尚未实现可运行应用。界面以 DeepSeek Harness（DSH）的 Trajectory 为基准，重新实现 Codex 日志适配与增量读取。
+M1 提供可运行的本地网页。输入 Codex 会话 ID，即可查看最近 50 条轨迹摘要，展开工具的参数和结果，以及日志中已有的思考摘要。界面沿用 DeepSeek Harness（DSH）Trajectory 的表格、时间线和记录检查器布局。
 
 ## 产品约定
 
@@ -17,6 +17,7 @@
 | 路径 | 内容 |
 |---|---|
 | [docs/PRD.md](docs/PRD.md) | 产品需求、范围、里程碑与验收标准 |
+| [docs/M1-VALIDATION.md](docs/M1-VALIDATION.md) | M1 浏览器验证、性能实测、DSH 依赖与适配差异 |
 | [references/README.md](references/README.md) | DSH 参考源码导航与更新方式 |
 | `references/deepseek-harness/` | 固定提交的上游完整源码，Git submodule |
 
@@ -32,12 +33,24 @@ git clone --recurse-submodules <本项目仓库地址>
 git submodule update --init --recursive
 ```
 
-当前没有配置远程仓库，也没有安装应用依赖。DSH 子模块用于查阅、比较和后续提取组件，不是已经接入的运行时依赖。
+DSH 子模块供查阅和对照。运行只依赖已提取到 `src/client/dsh/` 的展示代码和样式。
 
-## 拟采用的技术方向
+## 运行本地网页
 
-React + TypeScript 前端，Node.js 本地服务，独立的 Codex 日志解析模块，可重建的会话索引。具体构建工具、索引存储和 Desktop 桥接方式在第一阶段验证后确定。
+在项目根目录使用 Node.js 24 或更新版本运行以下命令。
+
+```sh
+npm ci
+npm run build
+npm start
+```
+
+打开 [本地轨迹查看器](http://127.0.0.1:4380/)，输入会话 UUID 后点击「打开」。也可以在浏览器地址中使用 `http://127.0.0.1:4380/?session=<会话 UUID>`。点击轨迹表格中的记录，在右侧检查器切换参数、结果或原始记录。内容较长时，点击「加载更多内容」。搜索范围为当前已加载摘要。
+
+服务默认在 `~/.codex/sessions` 和 `~/.codex/archived_sessions` 按文件名定位会话。可以通过 `CODEX_HOME` 指定日志根目录，通过 `TRAJECTORY_PORT` 指定端口。服务只在 IPv4 回环地址 `127.0.0.1` 监听，以只读方式访问指定会话。
+
+React + TypeScript 前端使用 Vite 构建。Node.js 服务提供静态页面、最近摘要与按需详情。可执行 `npm run typecheck` 和 `npm test` 验证项目。历史分页、增量刷新、子代理导航和 Desktop 面板见后续里程碑。
 
 ## 上游版权
 
-DSH 的许可证和版权声明保留在子模块中。未来复制或修改其代码时，应在本项目保留相应许可与来源记录。本项目原创部分尚未指定开源许可证。
+提取代码的 MIT 许可证和版权声明随源码保留。项目原创部分尚未指定开源许可证。具体来源及修改见 [M1 验证记录](docs/M1-VALIDATION.md)。

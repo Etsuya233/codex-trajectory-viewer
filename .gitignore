@@ -9,6 +9,7 @@ coverage/
 *.tsbuildinfo
 .DS_Store
 Thumbs.db
+.idea/
 
 # Local session data and generated indexes must not be committed.
 local-data/
