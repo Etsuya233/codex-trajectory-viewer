@@ -1,13 +1,15 @@
 import { randomUUID } from 'node:crypto';
-import { open, stat } from 'node:fs/promises';
+import { open } from 'node:fs/promises';
 import type { FileHandle } from 'node:fs/promises';
 import type { BigIntStats } from 'node:fs';
-import type { AgentLink, IndexedPage, SearchPage, SessionStats, ToolResult, TrajectoryDelta, TrajectoryEvent } from '../model.ts';
+import type { AgentLink, DetailField, IndexedPage, SearchPage, SessionStats, Source, ToolResult, TrajectoryDelta, TrajectoryEvent } from '../model.ts';
 import {
-  agentLink, CHUNK_BYTES, completedCommand, describe, detailSourceLimit, eventFor, findSession, object, outputObject, parse, processId,
-  readBytes, readRecent, RequestError, SESSION_ID, sourceFor, string,
+  agentLink, CHUNK_BYTES, completedCommand, describe, detailSourceLimit, eventFor, finiteNatural, object, outputObject, parse, processId,
+  readBytes, readDetail, readRecent, RequestError, SESSION_ID, sourceFor, string,
 } from './session.ts';
 import type { RecordValue } from './session.ts';
+import { locateRecord, sameLayout, snapshotRollout } from './rollout.ts';
+import type { RolloutLog, RolloutSnapshot } from './rollout.ts';
 
 const PAGE_SIZE = 50;
 const MAX_SESSIONS = 8;
@@ -24,10 +26,6 @@ type Metrics = Pick<SessionStats, keyof typeof perMetric>;
 const emptyMetrics: Metrics = {
   totalTokens: null, inputTokens: null, outputTokens: null, cachedInputTokens: null, reasoningOutputTokens: null,
 };
-
-function finiteNatural(value: unknown): number | null {
-  return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0 ? value : null;
-}
 
 function payloadMetrics(payload: RecordValue): Metrics {
   return Object.fromEntries(Object.entries(perMetric).map(([key, field]) => [key, finiteNatural(payload[field])])) as Metrics;
@@ -67,7 +65,7 @@ function mergeAgent(previous: AgentLink | undefined, next: AgentLink): AgentLink
 
 export class SessionIndex {
   readonly generation = randomUUID();
-  readonly path: string;
+  readonly log: RolloutLog;
   readonly id: string;
   private fingerprint: BigIntStats | null = null;
   private bytesRead = 0;
@@ -98,8 +96,8 @@ export class SessionIndex {
   private fork: string | null = null;
   private inheritedBefore: number | null = null;
 
-  constructor(path: string, id: string) {
-    this.path = path;
+  constructor(log: RolloutLog, id: string) {
+    this.log = log;
     this.id = id;
   }
 
@@ -115,24 +113,32 @@ export class SessionIndex {
   }
 
   async update(snapshot: BigIntStats) {
-    const size = Number(snapshot.size);
-    if (size > this.cursor) {
-      const file = await open(this.path, 'r');
+    for (const span of this.log.spans) {
+      const expected = span.limit === null ? snapshot : span.fingerprint;
+      const size = span.limit ?? Number(expected.size);
+      const end = span.start + size;
+      if (this.cursor >= end) continue;
+      if (this.cursor === span.start) {
+        this.checkpoint = Buffer.alloc(0);
+        this.fragments = [];
+        this.lineStart = this.cursor;
+      }
+      const file = await open(span.path, 'r');
       try {
         const opened = await file.stat({ bigint: true });
-        if (opened.ino !== snapshot.ino || opened.dev !== snapshot.dev || opened.birthtimeNs !== snapshot.birthtimeNs
-          || opened.size < snapshot.size || (opened.size === snapshot.size && opened.mtimeNs !== snapshot.mtimeNs)) {
+        if (opened.ino !== expected.ino || opened.dev !== expected.dev || opened.birthtimeNs !== expected.birthtimeNs
+          || opened.size < expected.size || (opened.size === expected.size && opened.mtimeNs !== expected.mtimeNs)) {
           throw new RequestError(409, '日志正在替换，请重试。');
         }
         if (this.checkpoint.length) {
-          const existing = await readBytes(file, this.cursor - this.checkpoint.length, this.checkpoint.length);
+          const existing = await readBytes(file, this.cursor - span.start - this.checkpoint.length, this.checkpoint.length);
           this.bytesVerified += existing.length;
           if (!existing.equals(this.checkpoint)) throw new ReplacedLogError();
         }
-        while (this.cursor < size) {
-          const chunk = await readBytes(file, this.cursor, Math.min(CHUNK_BYTES, size - this.cursor));
+        while (this.cursor < end) {
+          const chunk = await readBytes(file, this.cursor - span.start, Math.min(CHUNK_BYTES, end - this.cursor));
           this.bytesRead += chunk.length;
-          this.addChunk(chunk);
+          this.addChunk(chunk, span.inherited);
           this.checkpoint = chunk.length >= CHECKPOINT_BYTES ? Buffer.from(chunk.subarray(-CHECKPOINT_BYTES))
             : Buffer.concat([this.checkpoint, chunk]).subarray(-CHECKPOINT_BYTES);
           this.cursor += chunk.length;
@@ -144,7 +150,7 @@ export class SessionIndex {
     this.fingerprint = snapshot;
   }
 
-  private addChunk(chunk: Buffer) {
+  private addChunk(chunk: Buffer, inherited: boolean) {
     let start = 0;
     let end = chunk.indexOf(10);
     while (end >= 0) {
@@ -152,10 +158,11 @@ export class SessionIndex {
       if (length > 0 && length <= detailSourceLimit) {
         const segment = chunk.subarray(start, end);
         const bytes = this.fragments.length === 0 ? segment : Buffer.concat([...this.fragments, segment], length);
-        this.accept(parse(bytes), this.lineStart, bytes);
+        this.accept(parse(bytes), this.lineStart, bytes, inherited);
       } else if (length > detailSourceLimit) {
         this.record({
           kind: 'unknown', label: '记录超过 64 MiB', preview: '', timestamp: null, turn: this.turn,
+          ...(inherited ? { inherited: true } : {}),
           source: { offset: this.lineStart, length, digest: '' },
           problem: '记录超过详情读取上限，原始日志仍保留此行。',
         });
@@ -178,7 +185,7 @@ export class SessionIndex {
     this.changes.push(offset);
   }
 
-  private accept(record: RecordValue | null, offset: number, bytes: Buffer) {
+  private accept(record: RecordValue | null, offset: number, bytes: Buffer, inheritedSpan: boolean) {
     const payload = object(record?.payload);
     const type = string(record?.type);
     const eventType = string(payload.type);
@@ -190,7 +197,7 @@ export class SessionIndex {
         ?? (reference.thread_id ? null : finiteNatural(payload.forked_from_ordinal_exclusive));
     }
     const ordinal = finiteNatural(record?.ordinal);
-    const inherited = payload.inherited === true || (foreign !== undefined && foreign.toLowerCase() !== this.id)
+    const inherited = inheritedSpan || payload.inherited === true || (foreign !== undefined && foreign.toLowerCase() !== this.id)
       || (ordinal !== null && this.inheritedBefore !== null && ordinal < this.inheritedBefore && type !== 'session_meta');
     if (eventType === 'task_started' || type === 'turn_context') this.turn = string(payload.turn_id) ?? this.turn;
     if (!inherited) this.recordStats(type, eventType, payload);
@@ -421,7 +428,7 @@ export class SessionIndex {
     const matches: TrajectoryEvent[] = [];
     const needle = term.toLowerCase();
     const toolName = tool.toLowerCase();
-    const file = needle ? await open(this.path, 'r') : null;
+    const files = new Map<string, FileHandle>();
     try {
       const start = before === undefined ? this.ordered.length : bound(this.ordered, before);
       for (let index = start - 1; index >= 0; index--) {
@@ -432,23 +439,29 @@ export class SessionIndex {
         if (toolName && (event.kind !== 'tool' || !event.label.toLowerCase().includes(toolName))) continue;
         if (errorsOnly && event.kind !== 'error' && event.result?.status !== 'error'
           && !event.processUpdates?.some(result => result.status === 'error')) continue;
-        if (needle && !await this.matches(file!, event, needle)) continue;
+        if (needle && !await this.matches(files, event, needle)) continue;
         if (matches.length === SEARCH_RESULTS) return { events: matches, next: matches.at(-1)!.source.offset };
         matches.push(event);
       }
       return { events: matches, next: null };
     } finally {
-      await file?.close();
+      await Promise.all(Array.from(files.values(), file => file.close()));
     }
   }
 
-  private async matches(file: FileHandle, event: TrajectoryEvent, needle: string) {
+  private async matches(files: Map<string, FileHandle>, event: TrajectoryEvent, needle: string) {
     if (`${event.label} ${event.preview} ${event.result?.preview ?? ''}`.toLowerCase().includes(needle)) return true;
     const sources = new Map([event.source, ...(event.result ? [event.result.source] : []),
       ...(event.processUpdates ?? []).map(result => result.source)].map(source => [source.offset, source]));
     for (const source of sources.values()) {
       if (!source.digest) continue;
-      const bytes = await readBytes(file, source.offset, source.length);
+      const located = locateRecord(this.log, source);
+      let file = files.get(located.path);
+      if (!file) {
+        file = await open(located.path, 'r');
+        files.set(located.path, file);
+      }
+      const bytes = await readBytes(file, located.source.offset, source.length);
       if (sourceFor(source.offset, bytes).digest !== source.digest) throw new RequestError(409, '日志已变化，请重新搜索。');
       const record = parse(bytes);
       const text = record ? describe(record)?.content || (event.kind === 'unknown' ? bytes.toString('utf8') : '') : bytes.toString('utf8');
@@ -462,81 +475,77 @@ export class SessionIndex {
 class ReplacedLogError extends Error {}
 
 interface Entry {
-  path: string;
+  log?: RolloutLog;
+  loading?: Promise<RolloutSnapshot>;
   index: SessionIndex | null;
   updating?: Promise<SessionIndex>;
 }
 
 export class IndexStore {
   private readonly home: string;
-  private readonly entries = new Map<string, Promise<Entry>>();
+  private readonly entries = new Map<string, Entry>();
 
   constructor(home: string) { this.home = home; }
 
   private entry(id: string) {
     if (!SESSION_ID.test(id)) throw new RequestError(400, '会话 ID 必须是 UUID。');
     const key = id.toLowerCase();
-    let entry = this.entries.get(key);
-    if (!entry) {
-      entry = findSession(this.home, id).then(path => ({ path, index: null }));
-      entry.catch(() => { if (this.entries.get(key) === entry) this.entries.delete(key); });
-    }
+    const entry = this.entries.get(key) ?? { index: null };
     this.entries.delete(key);
     this.entries.set(key, entry);
     if (this.entries.size > MAX_SESSIONS) this.entries.delete(this.entries.keys().next().value!);
     return entry;
   }
 
-  async path(id: string) {
-    const entry = await this.entry(id);
-    await this.snapshot(id, entry);
-    return entry.path;
+  async detail(id: string, source: Source, field: DetailField, from: number) {
+    const { log } = await this.snapshot(id, this.entry(id));
+    const located = locateRecord(log, source);
+    return readDetail(located.path, located.source, field, from);
   }
 
   async recent(id: string): Promise<IndexedPage> {
-    const entry = await this.entry(id);
+    const entry = this.entry(id);
     if (entry.index === null) {
       // Give a large log a bounded tail preview while the forward scan runs separately.
-      const preview = await readRecent(entry.path).catch(async cause => {
-        if ((cause as NodeJS.ErrnoException).code !== 'ENOENT') throw cause;
-        await this.snapshot(id, entry);
-        return readRecent(entry.path);
-      });
-      void this.refresh(id, entry).catch(() => undefined);
+      const snapshot = await this.snapshot(id, entry);
+      const preview = await readRecent(snapshot.log.spans);
+      void this.refresh(id, entry, snapshot).catch(() => undefined);
       return { ...preview, generation: '', revision: 0, later: false, indexing: true };
     }
     return (await this.refresh(id, entry)).page();
   }
 
   async indexed(id: string) {
-    return this.refresh(id, await this.entry(id));
+    return this.refresh(id, this.entry(id));
   }
 
-  private async snapshot(id: string, entry: Entry) {
-    try {
-      return await stat(entry.path, { bigint: true });
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
-      entry.path = await findSession(this.home, id);
-      return stat(entry.path, { bigint: true });
-    }
+  private snapshot(id: string, entry: Entry) {
+    entry.loading ??= snapshotRollout(this.home, id, entry.log).then(snapshot => {
+      entry.log = snapshot.log;
+      return snapshot;
+    }).finally(() => { entry.loading = undefined; });
+    return entry.loading;
   }
 
-  private refresh(id: string, entry: Entry): Promise<SessionIndex> {
+  private refresh(id: string, entry: Entry, initial?: RolloutSnapshot): Promise<SessionIndex> {
     if (entry.updating) return entry.updating;
     entry.updating = (async () => {
       try {
-        const snapshot = await this.snapshot(id, entry);
+        let snapshot = initial ?? await this.snapshot(id, entry);
         const existing = entry.index;
-        let current = existing === null || existing.path !== entry.path || existing.needsRebuild(snapshot)
-          ? new SessionIndex(entry.path, id.toLowerCase()) : existing;
+        const same = existing !== null && sameLayout(existing.log, snapshot.log);
+        const replaced = same && existing.needsRebuild(snapshot.head);
+        if (replaced) snapshot = await snapshotRollout(this.home, id);
+        let current = same && !replaced ? existing : new SessionIndex(snapshot.log, id.toLowerCase());
         try {
-          await current.update(snapshot);
+          await current.update(snapshot.head);
         } catch (error) {
           if (!(error instanceof ReplacedLogError)) throw error;
-          current = new SessionIndex(entry.path, id.toLowerCase());
-          await current.update(snapshot);
+          snapshot = await snapshotRollout(this.home, id);
+          current = new SessionIndex(snapshot.log, id.toLowerCase());
+          await current.update(snapshot.head);
         }
+        entry.log = snapshot.log;
         entry.index = current;
         return current;
       } catch (error) {

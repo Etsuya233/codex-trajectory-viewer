@@ -1,11 +1,11 @@
 import { readdir, readFile, stat } from 'node:fs/promises';
 import { join } from 'node:path';
 import type { AgentLink, SessionChoice, SessionMeta } from '../model.ts';
-import { locateSession, object, readHead, SESSION_ID, string } from './session.ts';
+import { object, readHead, SESSION_ID, string } from './session.ts';
+import { locateSession, recordThread, ROLLOUT_NAME } from './rollout.ts';
 import type { RecordValue } from './session.ts';
 
 const LIMIT = 100;
-export const ROLLOUT_NAME = /^rollout-(\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2})-(.+)\.jsonl$/;
 
 interface IndexedName {
   name: string;
@@ -132,10 +132,11 @@ export class SessionCatalog {
         }
         if (!entry.isFile()) continue;
         const match = ROLLOUT_NAME.exec(entry.name);
-        if (!match || !SESSION_ID.test(match[2])) continue;
+        if (!match) continue;
         const id = match[2].toLowerCase();
         if (seen.has(id)) continue;
         const entryPath = join(path, entry.name);
+        if (match[3] && recordThread(await readHead(entryPath).catch(() => null)) !== id) continue;
         const indexedName = names.get(id);
         // Subagents are reachable from their parent, not from the thread list.
         if (indexed && indexedName === undefined && await this.isSubagent(entryPath)) continue;
@@ -162,7 +163,7 @@ export class SessionCatalog {
     const location = await locateSession(this.home, key);
     const snapshot = await fileKey(location.path);
     const names = await this.indexEntries();
-    const cacheKey = `${snapshot}:${this.index?.key ?? ''}`;
+    const cacheKey = `${location.path}:${snapshot}:${this.index?.key ?? ''}`;
     const cached = this.metas.get(key);
     if (cached?.key === cacheKey) return cached.meta;
 

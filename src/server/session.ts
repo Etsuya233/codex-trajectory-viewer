@@ -1,7 +1,6 @@
 import { createHash } from 'node:crypto';
-import { readdir, open } from 'node:fs/promises';
+import { open, stat } from 'node:fs/promises';
 import type { FileHandle } from 'node:fs/promises';
-import { join } from 'node:path';
 import type { AgentLink, DetailField, DetailPage, Source, ToolState, TrajectoryEvent, TrajectoryPage } from '../model.ts';
 
 export const SESSION_ID = /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i;
@@ -34,39 +33,15 @@ function list(value: unknown): unknown[] {
   return Array.isArray(value) ? value : [];
 }
 
-export interface SessionLocation {
+export function finiteNatural(value: unknown): number | null {
+  return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0 ? value : null;
+}
+
+export interface LogSpan {
   path: string;
-  archived: boolean;
-}
-
-export async function locateSession(home: string, id: string): Promise<SessionLocation> {
-  if (!SESSION_ID.test(id)) throw new RequestError(400, '会话 ID 必须是 UUID。');
-  const suffix = '-' + id.toLowerCase() + '.jsonl';
-  async function find(directory: string): Promise<string | undefined> {
-    const entries = await readdir(directory, { withFileTypes: true }).catch((error: NodeJS.ErrnoException) => {
-      if (error.code === 'ENOENT') return [];
-      throw error;
-    });
-    for (const entry of entries) {
-      if (entry.isFile() && entry.name.startsWith('rollout-') && entry.name.toLowerCase().endsWith(suffix)) {
-        return join(directory, entry.name);
-      }
-    }
-    const folders = entries.filter(entry => entry.isDirectory()).sort((a, b) => b.name.localeCompare(a.name));
-    for (const folder of folders) {
-      const match = await find(join(directory, folder.name));
-      if (match !== undefined) return match;
-    }
-  }
-  const live = await find(join(home, 'sessions'));
-  if (live !== undefined) return { path: live, archived: false };
-  const archived = await find(join(home, 'archived_sessions'));
-  if (archived !== undefined) return { path: archived, archived: true };
-  throw new RequestError(404, '找不到指定会话。');
-}
-
-export async function findSession(home: string, id: string): Promise<string> {
-  return (await locateSession(home, id)).path;
+  start: number;
+  limit: number | null;
+  inherited: boolean;
 }
 
 export async function readBytes(file: FileHandle, offset: number, length: number): Promise<Buffer> {
@@ -81,8 +56,7 @@ export async function readBytes(file: FileHandle, offset: number, length: number
 }
 
 /** Read completed lines backwards without opening any other log. */
-async function* recentLines(file: FileHandle, size: number) {
-  const minimum = Math.max(0, size - SCAN_BYTES);
+async function* recentLines(file: FileHandle, size: number, minimum: number) {
   let end = size;
   let lineEnd = size;
   let fragments: Buffer[] = [];
@@ -119,15 +93,26 @@ export function parse(bytes: Buffer): RecordValue | null {
   }
 }
 
-/** Read only the first record of a rollout, used for names and agent identity. */
+/** Read the first record without scanning the rest of the rollout. */
 export async function readHead(path: string): Promise<RecordValue | null> {
   const file = await open(path, 'r');
   try {
-    const buffer = Buffer.allocUnsafe(CHUNK_BYTES);
-    const { bytesRead } = await file.read(buffer, 0, buffer.length, 0);
-    const bytes = buffer.subarray(0, bytesRead);
-    const end = bytes.indexOf(10);
-    return parse(end < 0 ? bytes : bytes.subarray(0, end));
+    const fragments: Buffer[] = [];
+    let offset = 0;
+    while (offset <= detailSourceLimit) {
+      const buffer = Buffer.allocUnsafe(Math.min(CHUNK_BYTES, detailSourceLimit + 1 - offset));
+      const { bytesRead } = await file.read(buffer, 0, buffer.length, offset);
+      if (bytesRead === 0) return parse(Buffer.concat(fragments));
+      const bytes = buffer.subarray(0, bytesRead);
+      const end = bytes.indexOf(10);
+      if (end >= 0) {
+        const last = bytes.subarray(0, end);
+        return parse(fragments.length ? Buffer.concat([...fragments, last]) : last);
+      }
+      fragments.push(bytes);
+      offset += bytesRead;
+    }
+    return null;
   } finally {
     await file.close();
   }
@@ -353,59 +338,89 @@ export function eventFor(record: RecordValue | null, offset: number, bytes: Buff
   return event;
 }
 
-export async function readRecent(path: string): Promise<TrajectoryPage> {
+async function* recentLogLines(spans: readonly LogSpan[], size: number) {
+  const minimum = Math.max(0, size - SCAN_BYTES);
+  for (const span of spans.toReversed()) {
+    const end = span.limit ?? size - span.start;
+    const floor = Math.max(0, minimum - span.start);
+    if (end <= floor) continue;
+    const file = await open(span.path, 'r');
+    try {
+      for await (const line of recentLines(file, end, floor)) {
+        yield { offset: span.start + line.offset, bytes: line.bytes, inherited: span.inherited };
+      }
+    } finally {
+      await file.close();
+    }
+  }
+}
+
+/** A referenced prefix must end after a complete record with the expected ordinal. */
+export async function matchesHistoryEnd(path: string, end: number, ordinal: number): Promise<boolean> {
   const file = await open(path, 'r');
   try {
     const { size } = await file.stat();
-    const events: TrajectoryEvent[] = [];
-    const pendingResults = new Map<string, TrajectoryEvent>();
-    let group: TrajectoryEvent[] = [];
-    let turn: string | null = null;
-    let earliest = size;
-    let stoppedAtBoundary = false;
-    let omitted = false;
-
-    for await (const line of recentLines(file, size)) {
-      earliest = line.offset;
-      const record = parse(line.bytes);
-      const payload = object(record?.payload);
-      const marker = record?.type === 'event_msg' ? payload.type : undefined;
-      const turnId = string(payload.turn_id);
-      if (marker === 'task_complete' && turnId) turn = turnId;
-      if ((marker === 'task_started' || record?.type === 'turn_context') && turnId) {
-        for (const event of group) event.turn = turnId;
-        group = [];
-        turn = marker === 'task_started' ? null : turnId;
-        if (events.length >= PAGE_EVENTS && marker === 'task_started') {
-          stoppedAtBoundary = true;
-          break;
-        }
-      }
-      if (events.length >= PAGE_EVENTS && omitted) continue;
-      const event = eventFor(record, line.offset, line.bytes, turn);
-      if (event === null) continue;
-      if (events.length >= PAGE_EVENTS) {
-        omitted = true;
-        continue;
-      }
-      if (event.kind === 'result') {
-        if (event.callId && !pendingResults.has(event.callId)) pendingResults.set(event.callId, event);
-      }
-      if (event.kind === 'tool' && event.callId) {
-        const response = pendingResults.get(event.callId);
-        if (response) {
-          event.result = response.result;
-          pendingResults.delete(event.callId);
-          events.splice(events.indexOf(response), 1);
-        }
-      }
-      events.push(event);
-      group.push(event);
+    if (end > size || end === 0 || (await readBytes(file, end - 1, 1))[0] !== 10) return false;
+    for await (const { bytes } of recentLines(file, end, Math.max(0, end - detailSourceLimit - 1))) {
+      return finiteNatural(parse(bytes)?.ordinal) === ordinal - 1;
     }
-    return { events: events.reverse(), earlier: omitted || earliest > 0, scanLimited: !stoppedAtBoundary && size > SCAN_BYTES, size };
+    return false;
   } finally {
     await file.close();
   }
+}
+
+export async function readRecent(input: string | readonly LogSpan[]): Promise<TrajectoryPage> {
+  const spans = typeof input === 'string' ? [{ path: input, start: 0, limit: null, inherited: false }] : input;
+  const head = spans[spans.length - 1];
+  const size = head.start + (await stat(head.path)).size;
+  const events: TrajectoryEvent[] = [];
+  const pendingResults = new Map<string, TrajectoryEvent>();
+  let group: TrajectoryEvent[] = [];
+  let turn: string | null = null;
+  let earliest = size;
+  let stoppedAtBoundary = false;
+  let omitted = false;
+
+  for await (const line of recentLogLines(spans, size)) {
+    earliest = line.offset;
+    const record = parse(line.bytes);
+    const payload = object(record?.payload);
+    const marker = record?.type === 'event_msg' ? payload.type : undefined;
+    const turnId = string(payload.turn_id);
+    if (marker === 'task_complete' && turnId) turn = turnId;
+    if ((marker === 'task_started' || record?.type === 'turn_context') && turnId) {
+      for (const event of group) event.turn = turnId;
+      group = [];
+      turn = marker === 'task_started' ? null : turnId;
+      if (events.length >= PAGE_EVENTS && marker === 'task_started') {
+        stoppedAtBoundary = true;
+        break;
+      }
+    }
+    if (events.length >= PAGE_EVENTS && omitted) continue;
+    const event = eventFor(record, line.offset, line.bytes, turn);
+    if (event === null) continue;
+    if (line.inherited) event.inherited = true;
+    if (events.length >= PAGE_EVENTS) {
+      omitted = true;
+      continue;
+    }
+    if (event.kind === 'result') {
+      if (event.callId && !pendingResults.has(event.callId)) pendingResults.set(event.callId, event);
+    }
+    if (event.kind === 'tool' && event.callId) {
+      const response = pendingResults.get(event.callId);
+      if (response) {
+        event.result = response.result;
+        pendingResults.delete(event.callId);
+        events.splice(events.indexOf(response), 1);
+      }
+    }
+    events.push(event);
+    group.push(event);
+  }
+  return { events: events.reverse(), earlier: omitted || earliest > 0, scanLimited: !stoppedAtBoundary && size > SCAN_BYTES, size };
 }
 
 export async function readDetail(path: string, source: Source, field: DetailField, from: number): Promise<DetailPage> {

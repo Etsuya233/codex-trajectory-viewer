@@ -3,7 +3,8 @@ import assert from 'node:assert/strict';
 import { appendFile, mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { findSession, readDetail, readRecent, RequestError } from '../src/server/session.ts';
+import { findSession } from '../src/server/rollout.ts';
+import { readDetail, readRecent, RequestError } from '../src/server/session.ts';
 
 const sessionId = '00000000-0000-0000-0000-000000000001';
 const otherId = '00000000-0000-0000-0000-000000000002';

@@ -122,7 +122,7 @@ export function Inspector({ id, event, close, openAgent }: { id: string; event: 
         {timestamp === null ? '无时间戳' : new Date(timestamp).toLocaleString('zh-CN', { hour12: false })}
         <Status event={event} />
         {event.inherited ? <span>继承记录</span> : null}
-        <span title="原始日志字节偏移">字节 {tab.source.offset.toLocaleString('zh-CN')}</span>
+        <span title="会话日志字节偏移">字节 {tab.source.offset.toLocaleString('zh-CN')}</span>
       </div>
       <div className={ledger.detailTabs} aria-label="详情视图">
         {tabs.map(entry => (

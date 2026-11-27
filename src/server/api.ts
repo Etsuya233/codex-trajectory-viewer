@@ -1,5 +1,5 @@
 import type { DetailField } from '../model.ts';
-import { detailSourceLimit, readDetail, RequestError } from './session.ts';
+import { detailSourceLimit, RequestError } from './session.ts';
 import { IndexStore } from './index.ts';
 import { SessionCatalog } from './catalog.ts';
 
@@ -38,7 +38,7 @@ export function createTrajectoryApi(codexHome: string) {
       if (digest === null || !/^[a-f0-9]{64}$/.test(digest) || (field !== 'content' && field !== 'result' && field !== 'raw')) {
         throw new RequestError(400, '详情请求参数无效。');
       }
-      return readDetail(await store.path(id), { offset, length, digest }, field, from);
+      return store.detail(id, { offset, length, digest }, field, from);
     }
 
     const before = optionalOffset(search, 'before');
