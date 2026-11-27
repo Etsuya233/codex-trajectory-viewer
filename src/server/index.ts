@@ -89,9 +89,11 @@ export class SessionIndex {
   private readonly continuations = new Map<string, string>();
   private readonly usage = new Set<string>();
   private readonly durations = new Map<string, number | null>();
+  private readonly turnNumbers = new Map<string, number>();
   private readonly attributes = new Map<number, RecordValue>();
   private totals: Metrics = { ...emptyMetrics };
   private reported: Metrics | null = null;
+  private nextTurnNumber = 1;
   private turn: string | null = null;
   private fork: string | null = null;
   private inheritedBefore: number | null = null;
@@ -179,6 +181,14 @@ export class SessionIndex {
   }
 
   private record(event: TrajectoryEvent) {
+    if (event.turn) {
+      let ordinal = this.turnNumbers.get(event.turn);
+      if (ordinal === undefined) {
+        ordinal = this.nextTurnNumber++;
+        this.turnNumbers.set(event.turn, ordinal);
+      }
+      event.turnOrdinal = ordinal;
+    }
     const offset = event.source.offset;
     this.ordered.push(offset);
     this.events.set(offset, event);

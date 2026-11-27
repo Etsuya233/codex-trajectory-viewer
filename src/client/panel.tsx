@@ -4,6 +4,7 @@ import { MCP_CONTEXT, MCP_READ } from '../mcp-contract.ts';
 import type { PanelContext, PanelResponse } from '../mcp-contract.ts';
 import { App } from './App.tsx';
 import { errorMessage, setPanelReader } from './api.ts';
+import { applyTheme, type Theme } from './theme.ts';
 
 interface Connection {
   context?: PanelContext;
@@ -20,6 +21,7 @@ function isContext(value: unknown): value is PanelContext {
 
 export function Panel() {
   const [state, setState] = useState<Connection>({});
+  const [theme, setTheme] = useState<Theme | undefined>(undefined);
   const [attempt, setAttempt] = useState(0);
   useEffect(() => {
     const abort = new AbortController();
@@ -28,8 +30,19 @@ export function Panel() {
       abort.abort();
       return {};
     };
+    app.onhostcontextchanged = context => {
+      if (context.theme === 'light' || context.theme === 'dark') {
+        setTheme(context.theme);
+        applyTheme(context.theme);
+      }
+    };
     const connect = async () => {
       await app.connect(undefined, { signal: abort.signal, timeout: 8_000 });
+      const hostContext = app.getHostContext();
+      if (hostContext?.theme === 'light' || hostContext?.theme === 'dark') {
+        setTheme(hostContext.theme);
+        applyTheme(hostContext.theme);
+      }
       const answer = await app.callServerTool({ name: MCP_CONTEXT, arguments: {} }, { signal: abort.signal, timeout: 8_000 });
       const context = answer._meta?.trajectoryContext;
       if (!isContext(context)) throw new Error('宿主未返回有效的轨迹连接状态。');
@@ -50,11 +63,12 @@ export function Panel() {
     });
     return () => {
       abort.abort();
+      app.onhostcontextchanged = undefined;
       void app.close().catch(() => undefined);
     };
   }, [attempt]);
 
-  if (state.context) return <App embedded hostSession={state.context.mode === 'host-thread' ? state.context.sessionId : undefined} />;
+  if (state.context) return <App embedded hostTheme={theme} hostSession={state.context.mode === 'host-thread' ? state.context.sessionId : undefined} />;
   return <main className="shell">
     <header className="session-bar"><h1>Codex 轨迹</h1></header>
     {state.error

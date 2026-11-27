@@ -2,6 +2,7 @@ import { useEffect, useId, useState } from 'react';
 import type { FormEvent } from 'react';
 import type { AgentLink, SearchPage, SessionChoice, SessionStats, TrajectoryEvent } from '../model.ts';
 import { errorMessage, queryUrl, request, sessionUrl } from './api.ts';
+import { formatCompactNumber, formatExactNumber, formatLongDuration } from './format.ts';
 
 function shortId(id: string) {
   return id.slice(0, 8);
@@ -239,27 +240,30 @@ export function Statistics({ id, revision }: { id: string; revision: number }) {
     setError(null); setRetry(value => value + 1);
   }}>重试统计</button></p>;
   if (!stats) return <p role="status" className="stats stats-fault">正在读取会话统计…</p>;
-  const count = (value: number | null) => value?.toLocaleString('zh-CN') ?? '未知';
+  const count = (value: number | null) => formatCompactNumber(value);
+  const exact = (value: number | null) => formatExactNumber(value);
   const source = stats.source === 'response-usage' ? '逐响应记录'
     : stats.source === 'reported-cumulative' ? '最新累计快照' : '无可确认 Token 来源';
   return <section className="stats" aria-label="当前会话统计">
     <div className="stats-item">
       <span className="stats-label">日志来源</span>
-      <span className="stats-value">{source}</span>
+      <span className="stats-value" title="统计只覆盖日志中实际记录的值">{source}</span>
     </div>
     <div className="stats-item">
       <span className="stats-label">Token</span>
-      <span className="stats-value">{count(stats.totalTokens)}</span>
+      <span className="stats-value" title={exact(stats.totalTokens)}>{count(stats.totalTokens)}</span>
     </div>
     <div className="stats-item stats-item-wide">
-      <span className="stats-label">输入</span><span className="stats-value">{count(stats.inputTokens)}</span>
-      <span className="stats-label">缓存</span><span className="stats-value">{count(stats.cachedInputTokens)}</span>
-      <span className="stats-label">输出</span><span className="stats-value">{count(stats.outputTokens)}</span>
-      <span className="stats-label">推理</span><span className="stats-value">{count(stats.reasoningOutputTokens)}</span>
+      <span className="stats-label">输入</span><span className="stats-value" title={exact(stats.inputTokens)}>{count(stats.inputTokens)}</span>
+      <span className="stats-label">缓存</span><span className="stats-value" title={exact(stats.cachedInputTokens)}>{count(stats.cachedInputTokens)}</span>
+      <span className="stats-label">输出</span><span className="stats-value" title={exact(stats.outputTokens)}>{count(stats.outputTokens)}</span>
+      <span className="stats-label">推理</span><span className="stats-value" title={exact(stats.reasoningOutputTokens)}>{count(stats.reasoningOutputTokens)}</span>
     </div>
     <div className="stats-item">
       <span className="stats-label">轮次耗时</span>
-      <span className="stats-value">{stats.durationMs === null ? '未知' : `${count(stats.durationMs)} ms`}</span>
+      <span className="stats-value" title={stats.durationMs === null ? '日志未记录' : `${exact(stats.durationMs)} ms`}>
+        {stats.durationMs === null ? '未知' : formatLongDuration(stats.durationMs)}
+      </span>
       <span className="stats-note">有耗时 {stats.recordedTimedTurns}/{stats.completedTurns}</span>
     </div>
   </section>;

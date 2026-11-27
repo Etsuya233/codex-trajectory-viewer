@@ -3,6 +3,7 @@ import type { AgentLink, DetailField, DetailPage, EventKind, SessionMeta, Source
 import type { TrajectoryCellKind } from './dsh/trajectory-record.ts';
 import ledger from './dsh/TrajectoryTable.module.css';
 import { errorMessage, request, sessionUrl } from './api.ts';
+import { formatDuration } from './format.ts';
 import { agentLabel } from './SessionTools.tsx';
 
 export const kindStyles: Record<EventKind, { name: string; glyph: string; style: string; lane: TrajectoryCellKind }> = {
@@ -48,18 +49,96 @@ function Status({ event }: { event: TrajectoryEvent }) {
   </span>;
 }
 
+function decodeJsonString(value: string) {
+  try {
+    return JSON.parse('"' + value + '"') as string;
+  } catch {
+    return value.replace(/\\n/g, '\n').replace(/\\t/g, '\t').replace(/\\"/g, '"').replace(/\\\\/g, '\\');
+  }
+}
+
+function jsonString(text: string, field: string) {
+  const match = new RegExp(`"${field}"\\s*:\\s*"((?:[^"\\\\]|\\\\.)*)"`).exec(text);
+  return match ? decodeJsonString(match[1]) : null;
+}
+
+function firstLine(value: string) {
+  const line = value.replace(/\r?\n/g, ' ').replace(/\s+/g, ' ').trim();
+  return line.length > 160 ? line.slice(0, 160) + '…' : line;
+}
+
+/** A short, tool-aware label for the request side of a tool row. */
+export function toolCallSummary(event: TrajectoryEvent) {
+  const preview = event.preview;
+  if (event.label === 'js' || event.label === 'exec') {
+    const title = jsonString(preview, 'title');
+    if (title) return title;
+    const code = jsonString(preview, 'code');
+    if (code) return firstLine(code);
+    if (event.label === 'js' && preview.startsWith('{')) {
+      const stripped = preview.replace(/^\{\s*"code"\s*:\s*"/, '').replace(/",\s*"title".*$/s, '');
+      if (stripped !== preview) return firstLine(decodeJsonString(stripped));
+    }
+  }
+  if (event.label === 'exec_command') {
+    const command = jsonString(preview, 'cmd');
+    if (command) return `$ ${firstLine(command)}`;
+    const marker = '"-Command", "';
+    const at = preview.indexOf(marker);
+    if (at >= 0) return `$ ${firstLine(preview.slice(at + marker.length).replace(/\\n/g, ' '))}`;
+  }
+  if (event.label === 'send_message') {
+    const target = jsonString(preview, 'target');
+    const message = jsonString(preview, 'message');
+    if (target) return `${target}${message ? ' · ' + firstLine(message) : ''}`;
+  }
+  return firstLine(preview);
+}
+
+/** Extract readable text or an image marker from a serialized tool result. */
+export function toolResultSummary(event: TrajectoryEvent) {
+  if (!event.result) return '未见结果';
+  const exit = event.result.exitCode ?? event.processUpdates?.findLast(update => update.exitCode !== undefined)?.exitCode;
+  if (event.result.status === 'running' && exit === undefined) return '运行中';
+  if (/input_image|data:image\//.test(event.result.preview)) return '图片结果';
+  const match = /"text"\s*:\s*"((?:[^"\\]|\\.)*)"/.exec(event.result.preview);
+  const text = match ? decodeJsonString(match[1]) : event.result.preview;
+  const output = text.indexOf('Output:');
+  const useful = output >= 0 ? text.slice(output + 'Output:'.length) : text;
+  return firstLine(useful) || '空结果';
+}
+
+export function toolRunSummary(events: TrajectoryEvent[]) {
+  const counts = new Map<string, number>();
+  for (const event of events) counts.set(event.label, (counts.get(event.label) ?? 0) + 1);
+  const names = [...counts.entries()]
+    .sort((left, right) => right[1] - left[1])
+    .slice(0, 3)
+    .map(([name, count]) => `${name} ×${count}`)
+    .join(', ');
+  const errors = events.filter(hasError).length;
+  return `${events.length} 个工具调用${errors ? ` · ${errors} 失败` : ''}${names ? ' · ' + names : ''}`;
+}
+
 export function Content({ event }: { event: TrajectoryEvent }) {
   if (event.kind === 'tool') {
+    const duration = formatDuration(event.durationMs);
+    const exit = event.result?.exitCode ?? event.processUpdates?.findLast(update => update.exitCode !== undefined)?.exitCode;
+    const state = event.result?.status;
+    const status = exit !== undefined && exit !== 0 ? `exit ${exit}`
+      : state === 'error' ? '错误' : null;
     return (
-      <span className={event.result ? ledger.resultPreview : ledger.contentText}>
-        <span className={ledger.resultRequest}>
+      <span className={`${ledger.resultPreview} tool-line`}>
+        <span className={`${ledger.resultRequest} tool-request`}>
           <strong className={ledger.toolCallNameTypeface}>{event.label}</strong>
-          {event.preview ? <span className={ledger.toolCallPayload}> {event.preview}</span> : null}
+          <span className={`${ledger.toolCallPayload} tool-args`}>{toolCallSummary(event)}</span>
+          {duration ? <span className="tool-duration" title="工具执行耗时">{duration}</span> : null}
         </span>
         {event.result
           ? <span className={`${ledger.inlineResult} ${hasError(event) ? ledger.error : ''}`}>
+              {status ? <span className="tool-exit" data-error={hasError(event) || undefined}>{status}</span> : null}
               <span className={ledger.arrow}>→</span>
-              <span className={ledger.inlineResultText}>{event.result.preview || '空结果'}</span>
+              <span className={ledger.inlineResultText}>{toolResultSummary(event)}</span>
             </span>
           : null}
       </span>

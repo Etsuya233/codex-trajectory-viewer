@@ -4,12 +4,41 @@ import { request, sessionUrl } from './api.ts';
 import { Dropdown } from './Dropdown.tsx';
 import { SessionMenu, sessionLabel } from './SessionTools.tsx';
 import { Trajectory } from './Trajectory.tsx';
+import { applyTheme, initialTheme, rememberTheme, storedTheme, type Theme } from './theme.ts';
 import { useTrajectory } from './useTrajectory.ts';
 
-function LoadedSession({ id, active, openAgent }: { id: string; active: boolean; openAgent: (id: string) => void }) {
+const LAST_SESSION_KEY = 'codex-trajectory:last-session';
+const SESSION_ID = /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i;
+
+function readLastSession() {
+  try {
+    const value = localStorage.getItem(LAST_SESSION_KEY)?.trim();
+    return value && SESSION_ID.test(value) ? value : null;
+  } catch {
+    return null;
+  }
+}
+
+function writeLastSession(id: string) {
+  try {
+    localStorage.setItem(LAST_SESSION_KEY, id);
+  } catch {
+    // Remembering the last session is optional; a blocked storage area is harmless.
+  }
+}
+
+function LoadedSession({ id, active, openAgent, onChoose }: {
+  id: string;
+  active: boolean;
+  openAgent: (id: string) => void;
+  onChoose: () => void;
+}) {
   const { page, fault, working, fetchPage, viewEpoch } = useTrajectory(id, active);
   if (page) return <Trajectory key={viewEpoch} {...{ id, page, active, working, fault, fetchPage, openAgent }} />;
-  if (fault) return <p className="empty" role="alert">{fault} <button type="button" onClick={() => void fetchPage('recent')}>重试</button></p>;
+  if (fault) return <p className="empty" role="alert">{fault}
+    <button type="button" onClick={() => void fetchPage('recent')}>重试</button>
+    <button type="button" onClick={onChoose}>选择其他会话</button>
+  </p>;
   return <p className="empty" role="status">正在定位会话并读取最近记录…</p>;
 }
 
@@ -36,17 +65,64 @@ function subagentLabel(meta: SessionMeta) {
   return name || path || meta.id.slice(0, 8);
 }
 
+function Welcome({ open }: { open: (id: string) => void }) {
+  return <section className="welcome">
+    <div className="welcome-card">
+      <div className="welcome-intro">
+        <h2>查看一次 Codex 会话的轨迹</h2>
+        <p>从本机只读日志读取轮次、工具调用和结果。选择下面的会话，或按 UUID 直接打开。</p>
+      </div>
+      <div className="welcome-picker">
+        <SessionMenu current="" choose={open} />
+      </div>
+      <p className="welcome-hint">会话列表只读取索引元数据；打开后才读取轨迹。</p>
+    </div>
+  </section>;
+}
+
 interface AppProps {
   embedded?: boolean;
   hostSession?: string;
+  hostTheme?: Theme;
 }
 
-export function App({ embedded = false, hostSession }: AppProps) {
-  const [stack, setStack] = useState(() => embedded ? hostSession ? [hostSession] : [] : currentStack());
+export function App({ embedded = false, hostSession, hostTheme }: AppProps) {
+  const [stack, setStack] = useState(() => {
+    if (embedded) return hostSession ? [hostSession] : [];
+    const current = currentStack();
+    if (current.length) return current;
+    const last = readLastSession();
+    return last ? [last] : [];
+  });
   const id = stack.at(-1) ?? '';
   const [reload, setReload] = useState(0);
   const metaCache = useRef(new Map<string, SessionMeta>());
   const [metas, setMetas] = useState<ReadonlyMap<string, SessionMeta>>(new Map());
+  const [theme, setTheme] = useState<Theme>(() => hostTheme ?? initialTheme());
+
+  useEffect(() => {
+    applyTheme(theme);
+  }, [theme]);
+
+  useEffect(() => {
+    if (hostTheme) setTheme(hostTheme);
+  }, [hostTheme]);
+
+  useEffect(() => {
+    if (hostTheme) return;
+    const media = window.matchMedia('(prefers-color-scheme: dark)');
+    const onChange = () => {
+      if (storedTheme()) return;
+      setTheme(media.matches ? 'dark' : 'light');
+    };
+    media.addEventListener('change', onChange);
+    return () => media.removeEventListener('change', onChange);
+  }, [hostTheme]);
+
+  useEffect(() => {
+    if (embedded || !id) return;
+    writeLastSession(id);
+  }, [embedded, id]);
 
   useEffect(() => {
     const missing = stack.filter(session => !metaCache.current.has(session));
@@ -103,6 +179,23 @@ export function App({ embedded = false, hostSession }: AppProps) {
     }
   }
 
+  function toggleTheme() {
+    const next = theme === 'dark' ? 'light' : 'dark';
+    rememberTheme(next);
+    setTheme(next);
+  }
+
+  function chooseAnother() {
+    if (!embedded) {
+      try {
+        localStorage.removeItem(LAST_SESSION_KEY);
+      } catch {
+        // The welcome page is still reachable even when storage is unavailable.
+      }
+    }
+    navigate([]);
+  }
+
   const current = id ? metas.get(id) ?? null : null;
   const parentId = stack.length > 1 ? stack.at(-2)! : current?.kind === 'subagent' ? current.parentId : null;
   const parentName = parentId ? metas.get(parentId)?.name ?? null : null;
@@ -129,6 +222,11 @@ export function App({ embedded = false, hostSession }: AppProps) {
           : current?.kind === 'subagent' && current.parentId
             ? <button type="button" onClick={() => navigate([current.parentId!])}>打开父会话</button>
             : null}
+        <button type="button" className="theme-toggle" onClick={toggleTheme}
+          aria-label={theme === 'dark' ? '切换到亮色主题' : '切换到暗色主题'}
+          title={theme === 'dark' ? '切换到亮色主题' : '切换到暗色主题'}>
+          <span aria-hidden="true">{theme === 'dark' ? '☀' : '☾'}</span>
+        </button>
       </div>
     </header>
     <div className="session-stack">
@@ -136,10 +234,10 @@ export function App({ embedded = false, hostSession }: AppProps) {
         const active = index === stack.length - 1;
         return <div className="session-layer" key={session + ':' + reload} data-active={active}
           aria-hidden={!active || undefined} inert={!active || undefined}>
-          <LoadedSession id={session} active={active} openAgent={inspectAgent} />
+          <LoadedSession id={session} active={active} openAgent={inspectAgent} onChoose={chooseAnother} />
         </div>;
       })}
-      {stack.length === 0 ? <p className="empty">从上方选择会话，或按会话 ID 打开。</p> : null}
+      {stack.length === 0 ? <Welcome open={open} /> : null}
     </div>
   </main>;
 }

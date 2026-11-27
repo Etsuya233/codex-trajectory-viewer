@@ -13,6 +13,8 @@ export interface TrajectoryEvent {
   preview: string;
   timestamp: string | null;
   turn: string | null;
+  /** Stable 1-based turn number assigned while indexing from the log start. */
+  turnOrdinal?: number;
   callId?: string;
   result?: ToolResult;
   processUpdates?: ToolResult[];

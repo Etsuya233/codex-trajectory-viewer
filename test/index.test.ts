@@ -71,6 +71,22 @@ test('cold preview yields recent rows, then history traverses the complete index
   assert.equal((await log.store.recent(parent)).indexing, false);
 });
 
+test('assigns stable 1-based ordinals to turns while indexing', async context => {
+  const log = await fixture(
+    event('task_started', { turn_id: 'first-turn' })
+    + message('first turn message')
+    + event('task_complete', { turn_id: 'first-turn' })
+    + event('task_started', { turn_id: 'second-turn' })
+    + message('second turn message')
+    + event('task_complete', { turn_id: 'second-turn' }),
+  );
+  context.after(log.cleanup);
+  const index = await log.store.indexed(parent);
+  const rows = index.page().events;
+  assert.equal(rows.find(row => row.preview === 'first turn message')?.turnOrdinal, 1);
+  assert.equal(rows.find(row => row.preview === 'second turn message')?.turnOrdinal, 2);
+});
+
 test('normal ingestion parses only appended bytes and buffers a partial multi-chunk UTF-8 line', async context => {
   const first = message('a'.repeat(300));
   const log = await fixture(first);
