@@ -1,6 +1,46 @@
 import { useEffect, useState } from 'react';
-import type { SearchPage, SessionChoice, SessionStats, TrajectoryEvent } from '../model.ts';
+import type { AgentLink, SearchPage, SessionChoice, SessionStats, TrajectoryEvent } from '../model.ts';
 import { errorMessage, queryUrl, request, sessionUrl } from './api.ts';
+
+interface AgentDirectoryProps {
+  id: string;
+  generation: string;
+  revision: number;
+  active: boolean;
+  openAgent: (id: string) => void;
+}
+
+export function AgentDirectory({ id, generation, revision, active, openAgent }: AgentDirectoryProps) {
+  const [agents, setAgents] = useState<AgentLink[] | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [attempt, setAttempt] = useState(0);
+  useEffect(() => {
+    if (!active || !generation) return;
+    const abort = new AbortController();
+    const url = queryUrl(sessionUrl(id) + '/agents', { generation });
+    request<AgentLink[]>(url, abort.signal).then(entries => {
+      if (abort.signal.aborted) return;
+      setAgents(entries);
+      setError(null);
+    }).catch(cause => {
+      if (!abort.signal.aborted) setError(errorMessage(cause));
+    });
+    return () => abort.abort();
+  }, [active, id, generation, revision, attempt]);
+  return <section className="search-strip agent-directory" aria-label="子代理列表">
+    {error ? <p role="alert">{error} <button type="button" onClick={() => {
+      setError(null);
+      setAttempt(value => value + 1);
+    }}>重试子代理列表</button></p>
+      : agents === null ? <p role="status">{generation ? '正在读取子代理…' : '正在索引历史…'}</p>
+        : agents.length === 0 ? <p>当前会话暂无子代理。</p>
+          : <ul>{agents.map((agent, index) => <li key={agent.id ?? index}>
+            {agent.id ? <button type="button" onClick={() => openAgent(agent.id!)}>
+              <strong>{agent.label}</strong>{agent.label !== agent.id ? <small> {agent.id}</small> : null}
+            </button> : <span>{agent.label} · 无可用会话 ID</span>}
+          </li>)}</ul>}
+  </section>;
+}
 
 export function SessionPicker({ choose }: { choose: (id: string) => void }) {
   const [term, setTerm] = useState('');

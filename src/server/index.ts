@@ -67,6 +67,9 @@ export class SessionIndex {
   private readonly resultOffsets = new Map<string, number>();
   private readonly endOffsets = new Map<string, number>();
   private readonly agentsByCall = new Map<string, NonNullable<TrajectoryEvent['agents']>>();
+  private readonly agentsById = new Map<string, { id: string; label: string }>();
+  private readonly unresolvedAgents = new Map<string, string>();
+  private readonly resolvedAgentCalls = new Set<string>();
   private readonly processes = new Map<string, number>();
   private readonly continuations = new Map<string, string>();
   private readonly usage = new Set<string>();
@@ -178,7 +181,10 @@ export class SessionIndex {
     if (event) {
       if (inherited) event.inherited = true;
       this.record(event);
-      if (!inherited) this.associate(event, payload);
+      if (!inherited) {
+        this.associate(event, payload);
+        this.collectAgents(event);
+      }
     }
     if (eventType === 'task_complete' || eventType === 'turn_aborted') this.turn = null;
   }
@@ -270,6 +276,7 @@ export class SessionIndex {
     if (toolNamed(call.label, 'spawn_agent') && !call.agents?.some(agent => agent.id)) {
       const attrs = this.attributes.get(resultOffset) ?? {};
       call.agents = [agentLink(attrs.agent_id ?? attrs.thread_id ?? attrs.new_thread_id, string(attrs.nickname))];
+      if (call !== event) this.collectAgents(call);
     }
     this.attributes.delete(resultOffset);
   }
@@ -296,6 +303,28 @@ export class SessionIndex {
     if (!links) return;
     this.events.get(offset)!.agents = links;
     this.changes.push(offset);
+  }
+
+  private collectAgents(event: TrajectoryEvent) {
+    if (!event.agents?.length) return;
+    const key = event.callId ?? `offset:${event.source.offset}`;
+    for (const agent of event.agents) {
+      if (agent.id === this.id) continue;
+      if (agent.id !== null) {
+        const previous = this.agentsById.get(agent.id);
+        if (!previous || (previous.label === agent.id && agent.label !== agent.id)) {
+          this.agentsById.set(agent.id, { id: agent.id, label: agent.label });
+        }
+        this.resolvedAgentCalls.add(key);
+        this.unresolvedAgents.delete(key);
+      } else if (!this.resolvedAgentCalls.has(key)) {
+        this.unresolvedAgents.set(key, agent.label);
+      }
+    }
+  }
+
+  agentLinks() {
+    return [...this.agentsById.values(), ...Array.from(this.unresolvedAgents.values(), label => ({ id: null, label }))];
   }
 
   private linkProcess(call: TrajectoryEvent, result: ToolResult, callId: string) {

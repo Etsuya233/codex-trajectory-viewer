@@ -54,6 +54,8 @@ button { cursor: pointer; }
 
 .session-picker, .search-strip { max-height: 22vh; overflow: auto; }
 .session-picker ul, .search-strip ol { padding: 0; margin: 4px 0; list-style: none; }
+.agent-directory ul { padding: 0; margin: 0; list-style: none; }
+.agent-directory li small { color: var(--dsw-alias-label-secondary); }
 .session-picker li button, .search-strip li button {
   display: block;
   max-width: 100%;

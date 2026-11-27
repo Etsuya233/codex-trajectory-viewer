@@ -211,3 +211,29 @@ test('distinguishes a copied fork cutoff from a referenced history base', async 
   assert.equal(referencedIndex.statistics().durationMs, 11);
   assert.equal(referencedIndex.statistics().completedTurns, 1);
 });
+
+test('lists historical agents once by UUID and refreshes relationships without opening another log', async context => {
+  const missing = '00000000-0000-0000-0000-000000000023';
+  const second = '00000000-0000-0000-0000-000000000024';
+  const log = await fixture(call('spawn', 'spawn_agent', '{}') + output('spawn', { task_name: 'pending' })
+    + event('item_completed', { item: { type: 'SubAgentActivity', id: 'spawn', kind: 'started', agent_thread_id: child, agent_path: '/root/example' } })
+    + event('item_completed', { item: { type: 'CollabAgentToolCall', id: 'wait', tool: 'wait', receiver_thread_ids: [child] } })
+    + event('collab_agent_spawn_end', { call_id: 'unknown', new_agent_nickname: '未登记代理' })
+    + event('item_completed', { thread_id: missing, item: { type: 'SubAgentActivity', id: 'foreign', agent_thread_id: missing } })
+    + Array.from({ length: 70 }, (_, index) => message(String(index))).join(''));
+  context.after(log.cleanup);
+  const index = await log.store.indexed(parent);
+  assert.ok(index.page().events.every(record => !record.agents));
+  const before = index.revision;
+  assert.deepEqual(index.agentLinks(), [{ id: child, label: '/root/example' }, { id: null, label: '未登记代理' }]);
+  await assert.rejects(log.store.indexed(child), { status: 404 });
+
+  await appendFile(log.path, event('item_completed', { item: {
+    type: 'SubAgentActivity', id: 'unknown', agent_thread_id: second, agent_path: '/root/resolved',
+  } }));
+  assert.equal(await log.store.indexed(parent), index);
+  assert.ok(index.revision > before);
+  const after = index.readByteCount;
+  assert.deepEqual(index.agentLinks(), [{ id: child, label: '/root/example' }, { id: second, label: '/root/resolved' }]);
+  assert.equal(index.readByteCount, after);
+});

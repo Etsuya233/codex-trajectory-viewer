@@ -11,8 +11,8 @@ const port = Number(process.env.TRAJECTORY_PORT ?? 4380);
 if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error('Invalid TRAJECTORY_PORT');
 const codexHome = process.env.CODEX_HOME || join(homedir(), '.codex');
 const store = new IndexStore(codexHome);
-const staticRoot = new URL('../../dist/m2/', import.meta.url);
-const sessionRoute = /^\/api\/sessions\/([^/]+)(?:\/(detail|updates|search|stats))?$/;
+const staticRoot = new URL('../../dist/viewer/', import.meta.url);
+const sessionRoute = /^\/api\/sessions\/([^/]+)(?:\/(detail|updates|search|stats|agents))?$/;
 const assetRoute = /^\/assets\/[a-zA-Z0-9_.-]+\.(js|css)$/;
 const csp = "default-src 'self'; style-src 'self' 'unsafe-inline'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'";
 
@@ -65,6 +65,7 @@ const server = createServer(async (req, res) => {
         }
         if (!endpoint) return sendJson(200, index.page(before, around, after));
         if (endpoint === 'stats') return sendJson(200, index.statistics());
+        if (endpoint === 'agents') return sendJson(200, index.agentLinks());
         if (endpoint === 'updates') {
           const revision = requiredInteger(url.searchParams, 'revision', 0, Number.MAX_SAFE_INTEGER);
           return sendJson(200, index.delta(generation ?? '', revision, optionalOffset(url.searchParams, 'lower') ?? 0,

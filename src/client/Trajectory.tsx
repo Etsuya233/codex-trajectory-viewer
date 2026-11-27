@@ -2,7 +2,7 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } fr
 import type { IndexedPage, TrajectoryEvent } from '../model.ts';
 import { sessionUrl } from './api.ts';
 import { Content, hasError, Inspector, KindTag, kindStyles, timeValue } from './RecordView.tsx';
-import { SessionSearch, Statistics } from './SessionTools.tsx';
+import { AgentDirectory, SessionSearch, Statistics } from './SessionTools.tsx';
 import { TrajectoryTimeline } from './dsh/TrajectoryTimeline.tsx';
 import { trajectoryTimelineFocusIndexes } from './dsh/timeline.ts';
 import type { TrajectoryTimeRange, TrajectoryTimelineMode } from './dsh/timeline.ts';
@@ -14,6 +14,7 @@ import toolbar from './dsh/TrajectoryToolbar.module.css';
 const ROW_HEIGHT = 30;
 const OVERSCAN = 12;
 const TIMELINE_LIMIT = 600;
+const HISTORY_THRESHOLD = 120;
 
 type Row = { key: string; items: TrajectoryEvent[]; folded: boolean; label: string } | { key: number; event: TrajectoryEvent };
 
@@ -62,6 +63,8 @@ export function Trajectory({ id, page, active, working, fault, fetchPage, openAg
   const [errorsOnly, setErrorsOnly] = useState(false);
   const [scope, setScope] = useState<'loaded' | 'all'>('loaded');
   const [statistics, setStatistics] = useState(false);
+  const [showAgents, setShowAgents] = useState(false);
+  const [historyFailed, setHistoryFailed] = useState(false);
   const [mode, setMode] = useState<TrajectoryTimelineMode>('sequence');
   const [range, setRange] = useState<TrajectoryTimeRange | null>(null);
   const [focusRequest, setFocusRequest] = useState<number | null>(null);
@@ -70,6 +73,8 @@ export function Trajectory({ id, page, active, working, fault, fetchPage, openAg
   const table = useRef<HTMLTableElement>(null);
   const oldRows = useRef<Row[]>([]);
   const follow = useRef(true);
+  const previousTop = useRef(0);
+  const earlierRequest = useRef<symbol | null>(null);
   const restoreFocus = useRef(false);
   const selectedEvent = page.events.find(event => event.source.offset === selected);
   const hasQuery = scope === 'loaded' && (query.trim() !== '' || tool.trim() !== '' || errorsOnly);
@@ -113,6 +118,13 @@ export function Trajectory({ id, page, active, working, fault, fetchPage, openAg
     setViewport(previous => previous.first === first && previous.count === count ? previous : { first, count });
   }, []);
 
+  function scrollTo(element: HTMLDivElement, top: number) {
+    element.scrollTop = top;
+    previousTop.current = element.scrollTop;
+  }
+
+  useLayoutEffect(() => () => { earlierRequest.current = null; }, [active]);
+
   useLayoutEffect(() => {
     const element = pane.current;
     if (!element || !active) return;
@@ -127,16 +139,21 @@ export function Trajectory({ id, page, active, working, fault, fetchPage, openAg
     if (focusRequest !== null) {
       const index = rowIndex.get(focusRequest);
       if (index !== undefined) {
-        element.scrollTop = index * ROW_HEIGHT;
+        scrollTo(element, index * ROW_HEIGHT);
         follow.current = false;
         setFocusRequest(null);
       }
     } else if (oldRows.current !== rows) {
-      if (follow.current) element.scrollTop = element.scrollHeight;
+      if (follow.current) scrollTo(element, element.scrollHeight);
       else {
-        const prior = oldRows.current[Math.floor(element.scrollTop / ROW_HEIGHT)];
-        const nextIndex = prior ? rowIndex.get(prior.key) : undefined;
-        if (nextIndex !== undefined) element.scrollTop = nextIndex * ROW_HEIGHT + element.scrollTop % ROW_HEIGHT;
+        const previousIndex = Math.floor(element.scrollTop / ROW_HEIGHT);
+        // A group header can stay at the top even when all its event rows move.
+        const anchorIndex = oldRows.current.findIndex((row, index) =>
+          index >= previousIndex && typeof row.key === 'number' && rowIndex.has(row.key));
+        const index = anchorIndex < 0 ? previousIndex : anchorIndex;
+        const key = oldRows.current[index]?.key;
+        const nextIndex = key === undefined ? undefined : rowIndex.get(key);
+        if (nextIndex !== undefined) scrollTo(element, element.scrollTop + (nextIndex - index) * ROW_HEIGHT);
       }
     }
     oldRows.current = rows;
@@ -185,6 +202,20 @@ export function Trajectory({ id, page, active, working, fault, fetchPage, openAg
     setSelected(offset);
     focus(offset);
   }, [focus]);
+
+  async function loadEarlier(automatic = false) {
+    if (!active || page.indexing || !page.earlier || working || earlierRequest.current !== null) return;
+    if (automatic && (historyFailed || fault || hasQuery || scope !== 'loaded' || range !== null)) return;
+    const request = Symbol();
+    earlierRequest.current = request;
+    follow.current = false;
+    setHistoryFailed(false);
+    const loaded = await fetchPage('before');
+    if (earlierRequest.current === request) {
+      earlierRequest.current = null;
+      setHistoryFailed(!loaded);
+    }
+  }
 
   async function jump(event: TrajectoryEvent) {
     const offset = event.source.offset;
@@ -239,6 +270,8 @@ export function Trajectory({ id, page, active, working, fault, fetchPage, openAg
             onClick={() => setErrorsOnly(current => !current)}>仅错误</button>
           <button className={toolbar.toggle} type="button" aria-pressed={statistics}
             onClick={() => setStatistics(current => !current)}>统计</button>
+          <button className={toolbar.toggle} type="button" aria-expanded={showAgents}
+            onClick={() => setShowAgents(current => !current)}>子代理</button>
         </div>
         <select aria-label="搜索范围" value={scope} onChange={event => setScope(event.currentTarget.value as typeof scope)}>
           <option value="loaded">已加载摘要</option><option value="all">全会话</option>
@@ -254,30 +287,38 @@ export function Trajectory({ id, page, active, working, fault, fetchPage, openAg
       </div>
     </section>
     {statistics && active ? <Statistics id={id} revision={page.revision} /> : null}
+    {showAgents ? <AgentDirectory id={id} generation={page.generation} revision={page.revision} active={active}
+      openAgent={openAgent} /> : null}
     {scope === 'all' && active ? <SessionSearch key={JSON.stringify([page.generation, query, tool, errorsOnly])} id={id}
       generation={page.generation} term={query} tool={tool}
       errors={errorsOnly} select={jump} disabled={working} /> : null}
     <TrajectoryTimeline t={translate} turns={timeline} mode={mode} range={range} onRangeChange={setRange}
       selectedIndex={selected} searchMatchIndexes={matches} onRecordFocus={focus} onRecordSelect={selectTimeline} />
     <div className="history-controls">
-      <button type="button" disabled={page.indexing || working || !page.earlier} onClick={() => {
-        follow.current = false;
-        void fetchPage('before');
-      }}>加载更早</button>
+      <button type="button" disabled={page.indexing || working || !page.earlier}
+        onClick={() => void loadEarlier()}>{historyFailed ? '重试加载更早' : '加载更早'}</button>
       {page.later ? <button type="button" disabled={working} onClick={() => void fetchPage('after')}>加载更新</button> : null}
       {page.later || !follow.current ? <button type="button" disabled={working} onClick={() => {
         follow.current = true;
         if (page.later) void fetchPage('recent');
-        else if (pane.current) pane.current.scrollTop = pane.current.scrollHeight;
+        else if (pane.current) scrollTo(pane.current, pane.current.scrollHeight);
       }}>回到最新</button> : null}
       {working ? <span role="status">正在读取…</span> : null}
-      {fault ? <span role="alert">{fault} <button type="button" onClick={() => void fetchPage('recent')}>重试</button></span> : null}
+      {historyFailed ? <span role="alert">{fault ?? '无法加载更早的记录。'}</span>
+        : fault ? <span role="alert">{fault} <button type="button" onClick={() => void fetchPage('recent')}>重试</button></span> : null}
     </div>
     <div className={ledger.split} onKeyDown={e => { if (e.key === 'Escape' && selectedEvent) close(); }}>
       <div ref={pane} className={`${ledger.tablePane} virtual-ledger`} onScroll={event => {
         const element = event.currentTarget;
-        follow.current = !page.later && element.scrollHeight - element.clientHeight - element.scrollTop < 6;
+        const top = element.scrollTop;
+        const movingUp = top < previousTop.current;
+        previousTop.current = top;
+        follow.current = !page.later && element.scrollHeight - element.clientHeight - top < 6;
         trackViewport();
+        if (movingUp && top <= HISTORY_THRESHOLD) void loadEarlier(true);
+      }} onWheel={event => {
+        const element = event.currentTarget;
+        if (event.deltaY < 0 && element.scrollTop === 0 && element.scrollHeight > element.clientHeight) void loadEarlier(true);
       }}>
         <table ref={table} className={ledger.table} data-scroll-ready="true" aria-label="会话轨迹">
           <colgroup><col className={ledger.eventColumn} /><col className={ledger.contentColumn} /></colgroup>
