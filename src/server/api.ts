@@ -1,4 +1,4 @@
-import type { DetailField } from '../model.ts';
+import { isDetailField } from '../model.ts';
 import { detailSourceLimit, RequestError } from './session.ts';
 import { IndexStore } from './index.ts';
 import { SessionCatalog } from './catalog.ts';
@@ -34,8 +34,8 @@ export function createTrajectoryApi(codexHome: string) {
       const length = requiredInteger(search, 'length', 1, detailSourceLimit);
       const from = requiredInteger(search, 'from', 0, Number.MAX_SAFE_INTEGER);
       const digest = search.get('digest');
-      const field = search.get('field') as DetailField | null;
-      if (digest === null || !/^[a-f0-9]{64}$/.test(digest) || (field !== 'content' && field !== 'result' && field !== 'raw')) {
+      const field = search.get('field');
+      if (digest === null || !/^[a-f0-9]{64}$/.test(digest) || !isDetailField(field)) {
         throw new RequestError(400, '详情请求参数无效。');
       }
       return store.detail(id, { offset, length, digest }, field, from);

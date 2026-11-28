@@ -40,6 +40,7 @@ export interface ToolResult {
   status: ToolState;
   processId?: string;
   exitCode?: number;
+  outputMissing?: true;
   detailField?: 'result';
 }
 
@@ -104,7 +105,12 @@ export interface SearchPage {
   next: number | null;
 }
 
-export type DetailField = 'content' | 'result' | 'raw';
+export const detailFields = ['content', 'result', 'raw', 'input', 'output', 'raw-input', 'raw-output'] as const;
+export type DetailField = typeof detailFields[number];
+
+export function isDetailField(value: unknown): value is DetailField {
+  return detailFields.some(field => field === value);
+}
 
 export interface DetailPage {
   text: string;

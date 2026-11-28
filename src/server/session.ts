@@ -204,6 +204,79 @@ export function completedCommand(payload: RecordValue) {
   return item.type === 'CommandExecution' || item.type === 'command_execution' ? item : null;
 }
 
+function toolInput(payload: RecordValue, command: RecordValue | null) {
+  return command ? command.command : payload.arguments ?? payload.input ?? payload.action ?? payload.query;
+}
+
+function toolOutput(payload: RecordValue, command: RecordValue | null) {
+  if (command) return command.aggregated_output;
+  if (payload.type === 'exec_command_end') {
+    return payload.aggregated_output ?? (payload.stdout !== undefined || payload.stderr !== undefined
+      ? { stdout: payload.stdout, stderr: payload.stderr } : undefined);
+  }
+  return payload.output ?? payload.result;
+}
+
+function decodeObject(value: unknown): RecordValue {
+  if (typeof value !== 'string') return object(value);
+  if (!value.trimStart().startsWith('{')) return {};
+  try { return object(JSON.parse(value)); }
+  catch { return {}; }
+}
+
+function shellScript(value: unknown): string | undefined {
+  if (!Array.isArray(value) || value.length < 3) return undefined;
+  const executable = (string(value[0]) ?? '').split(/[\\/]/).at(-1) ?? '';
+  const isPowerShell = /^(?:pwsh|powershell)(?:\.exe)?$/i.test(executable);
+  const isPosixShell = /^(?:bash|sh|zsh|dash|fish)(?:\.exe)?$/i.test(executable);
+  if (!isPowerShell && !isPosixShell) return undefined;
+  const option = isPowerShell ? /^(?:-Command|-c)$/i : /^-[il]*c$/;
+  const at = value.findIndex((part, index) => index > 0 && typeof part === 'string' && option.test(part));
+  return at === value.length - 2 ? string(value[at + 1]) : undefined;
+}
+
+function readableInput(value: unknown, label: string, summary = false) {
+  if (label === 'exec_command') return shellScript(value) ?? string(decodeObject(value).cmd) ?? text(value);
+  if (label === 'exec' || label === 'js') {
+    const args = decodeObject(value);
+    return (summary ? string(args.title)?.trim() || undefined : undefined) ?? string(args.code) ?? text(value);
+  }
+  if (summary && label === 'send_message') {
+    const args = decodeObject(value);
+    if (typeof args.target === 'string') return [args.target, string(args.message)].filter(Boolean).join(' · ');
+  }
+  return text(value);
+}
+
+function readableTextBlock(value: string) {
+  if (value.startsWith('data:image/')) return '图片结果';
+  const output = /\r?\n(?:Output|Final output):(?:\r?\n|$)/.exec(value);
+  if (output && /^(?:Chunk ID: [^\r\n]+|Script (?:completed|running|failed))\r?\n/.test(value)
+    && /\r?\n(?:Wall time\b|Process (?:exited|running)\b)/.test(value.slice(0, output.index))) {
+    return value.slice(output.index + output[0].length);
+  }
+  return value;
+}
+
+function readableOutput(value: unknown, payload: RecordValue, command: RecordValue | null) {
+  if (command) return text(value);
+  if (Array.isArray(value)) return value.map(block => {
+    const details = object(block);
+    if (typeof details.text === 'string') return readableTextBlock(details.text);
+    if (details.type === 'input_image' || details.type === 'output_image' || details.type === 'image') return '图片结果';
+    return typeof block === 'string' ? readableTextBlock(block) : text(block);
+  }).filter(block => block.trim() !== '').join('\n\n');
+  const body = typeof value === 'string' ? readableTextBlock(value) : value;
+  const fields = typeof body === 'string' ? parseOutputObject(body) : object(body);
+  if (payload.type === 'exec_command_end' && payload.aggregated_output == null) {
+    return [string(fields.stdout), string(fields.stderr)].filter(Boolean).join('\n');
+  }
+  if ('exit_code' in fields || 'chunk_id' in fields || 'session_id' in fields) {
+    return string(fields.output) ?? string(fields.text) ?? text(body);
+  }
+  return text(body);
+}
+
 function parseOutputObject(value: string): RecordValue {
   if (value.length > CHUNK_BYTES || !value.trimStart().startsWith('{')) return {};
   try {
@@ -221,7 +294,7 @@ const internalEvents = new Set([
   'user_message', 'agent_message', 'agent_reasoning', 'agent_reasoning_raw_content',
 ]);
 
-export function describe(record: RecordValue): {
+export function describe(record: RecordValue, forPreview = false): {
   kind: TrajectoryEvent['kind']; label: string; content: string; callId?: string; state?: ToolState; agents?: AgentLink[];
 } | null {
   const type = string(record.type) ?? 'unknown';
@@ -239,14 +312,15 @@ export function describe(record: RecordValue): {
   if (housekeeping.has(type)) return null;
   if (type === 'response_item') {
     const callId = string(payload.call_id);
-    if (calls.has(subtype)) return {
-      kind: 'tool', label: string(payload.name) ?? subtype,
-      content: text(payload.arguments ?? payload.input ?? payload.action ?? payload.query), callId,
-    };
+    if (calls.has(subtype)) {
+      const label = string(payload.name) ?? subtype;
+      const input = toolInput(payload, null);
+      return { kind: 'tool', label, content: forPreview ? readableInput(input, label, true) : text(input), callId };
+    }
     if (results.has(subtype)) {
       const output = payload.output ?? payload.result;
       return {
-        kind: 'result', label: '工具结果', content: text(output), callId,
+        kind: 'result', label: '工具结果', content: forPreview ? readableOutput(output, payload, null) : text(output), callId,
         state: outputState(output, payload),
       };
     }
@@ -282,11 +356,16 @@ export function describe(record: RecordValue): {
         content: text(item.agents_states ?? item.status), callId: string(item.id), agents };
     }
     const command = completedCommand(payload);
-    if (command) return { kind: 'tool', label: 'exec_command', content: text(command.command), callId: string(command.id) };
+    if (command) return {
+      kind: 'tool', label: 'exec_command', callId: string(command.id),
+      content: forPreview ? readableInput(command.command, 'exec_command', true) : text(command.command),
+    };
     if (internalEvents.has(subtype)) return null;
     if (subtype === 'exec_command_end' && outputExitCode(payload) !== undefined) {
       return { kind: 'result', label: '进程退出',
-        content: text(payload.aggregated_output ?? payload.stdout ?? payload.stderr), callId: string(payload.call_id),
+        content: forPreview ? readableOutput(toolOutput(payload, null), payload, null)
+          : text(payload.aggregated_output ?? payload.stdout ?? payload.stderr),
+        callId: string(payload.call_id),
         state: outputState(payload, payload) };
     }
     if (subtype === 'collab_agent_spawn_end' || subtype === 'collab_waiting_end') {
@@ -307,7 +386,7 @@ export function describe(record: RecordValue): {
 export function eventFor(record: RecordValue | null, offset: number, bytes: Buffer, turn: string | null): TrajectoryEvent | null {
   const description = record === null
     ? { kind: 'unknown' as const, label: '无法解析的记录', content: '' }
-    : describe(record);
+    : describe(record, true);
   if (description === null) return null;
   const event: TrajectoryEvent = {
     source: sourceFor(offset, bytes), kind: description.kind, label: description.label,
@@ -320,6 +399,7 @@ export function eventFor(record: RecordValue | null, offset: number, bytes: Buff
     const output = payload.type === 'exec_command_end' ? payload : payload.output ?? payload.result;
     event.result = { source: event.source, preview: event.preview, status: description.state ?? 'returned',
       processId: outputProcessId(output), exitCode: outputExitCode(output) };
+    if (toolOutput(payload, null) == null) event.result.outputMissing = true;
   }
   const command = completedCommand(object(record?.payload));
   if (command) {
@@ -329,6 +409,7 @@ export function eventFor(record: RecordValue | null, offset: number, bytes: Buff
       source: event.source, preview: preview(result), status: command.status === 'failed' ? 'error' : outputState(command, command),
       processId: processId(command.process_id), exitCode, detailField: 'result',
     };
+    if (command.aggregated_output == null) event.result.outputMissing = true;
     const duration = object(command.duration);
     if (typeof duration.secs === 'number' && typeof duration.nanos === 'number') {
       const milliseconds = 1000 * duration.secs + duration.nanos / 1_000_000;
@@ -433,16 +514,27 @@ export async function readDetail(path: string, source: Source, field: DetailFiel
       throw new RequestError(409, '记录已变化，请重新打开会话。');
     }
     const record = parse(bytes);
-    const command = completedCommand(object(record?.payload));
-    const content = field === 'raw' ? bytes.toString('utf8').trimEnd()
-      : field === 'result' ? string(command?.aggregated_output) ?? ''
-        : record ? describe(record)?.content ?? '' : '';
+    const content = field === 'raw' ? bytes.toString('utf8').replace(/\r$/, '') : detailText(record, field);
     if (from > content.length) throw new RequestError(400, '详情位置超出范围。');
     let end = Math.min(content.length, from + DETAIL_CHARS);
     if (end < content.length && /[\uD800-\uDBFF]/.test(content[end - 1])) end--;
     return { text: content.slice(from, end), next: end < content.length ? end : null };
   } finally {
     await file.close();
+  }
+}
+
+function detailText(record: RecordValue | null, field: Exclude<DetailField, 'raw'>) {
+  if (!record) return '';
+  const payload = object(record.payload);
+  const command = completedCommand(payload);
+  switch (field) {
+    case 'input': return readableInput(toolInput(payload, command), command ? 'exec_command' : string(payload.name) ?? '');
+    case 'output': return readableOutput(toolOutput(payload, command), payload, command);
+    case 'raw-input': return text(toolInput(payload, command));
+    case 'raw-output': return text(toolOutput(payload, command));
+    case 'result': return string(command?.aggregated_output) ?? '';
+    case 'content': return describe(record)?.content ?? '';
   }
 }
 

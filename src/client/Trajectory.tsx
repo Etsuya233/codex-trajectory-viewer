@@ -72,8 +72,14 @@ function makeTimeline(events: TrajectoryEvent[]): TrajectoryTurnModel[] {
   }));
 }
 
-function turnLabel(group: Group) {
-  return group.ordinal === null ? '轮次' : `第 ${group.ordinal} 轮`;
+function TurnMeta({ group }: { group: Group }) {
+  const time = clockTime(group.startedAt);
+  return <>
+    <strong className="turn-label">{group.ordinal === null ? '轮次' : `第 ${group.ordinal} 轮`}</strong>
+    {time ? <span className="turn-time">{time}</span> : null}
+    <span>{group.events.length} 条</span>
+    {group.errorCount ? <span className="turn-errors">{group.errorCount} 错误</span> : null}
+  </>;
 }
 
 function narrowLayout() {
@@ -474,6 +480,18 @@ export function Trajectory({ id, page, active, working, fault, fetchPage, metas,
         {page.indexing ? <span className="record-count" role="status">正在索引历史…</span> : null}
         {page.scanLimited ? <span className="record-count">预览已达到日志尾部读取上限。</span> : null}
         {page.events.length > TIMELINE_LIMIT ? <span className="record-count">时间线覆盖滚动位置附近 {TIMELINE_LIMIT} 条</span> : null}
+        {!loadAll && page.earlier ? <button className={toolbar.toggle} type="button" disabled={page.indexing || working}
+          onClick={() => void loadEarlier()}>{historyFailed ? '重试加载更早' : '加载更早'}</button> : null}
+        {!loadAll && page.later ? <button className={toolbar.toggle} type="button" disabled={working}
+          onClick={() => void fetchPage('after')}>加载更新</button> : null}
+        {loadingHistory ? <span className="record-count" role="status">正在加载全部历史…</span> : null}
+        {historyFault ? <span className="trajectory-error" role="alert">{historyFault}
+          <button className={toolbar.toggle} type="button" onClick={retryHistory}>重试加载历史</button>
+        </span> : null}
+        {historyFailed && !loadAll ? <span className="trajectory-error" role="alert">{fault ?? '无法加载更早的记录。'}</span>
+          : fault ? <span className="trajectory-error" role="alert">{fault}
+            <button className={toolbar.toggle} type="button" onClick={() => void fetchPage('recent')}>重试</button>
+          </span> : null}
       </div>
     </section>
     {statistics && active ? <Statistics id={id} revision={page.revision} /> : null}
@@ -482,18 +500,6 @@ export function Trajectory({ id, page, active, working, fault, fetchPage, metas,
       selected={selected} select={jump} disabled={working} /> : null}
     <TrajectoryTimeline t={translate} turns={timeline} mode={mode} range={range} onRangeChange={setRange}
       selectedIndex={selected} onRecordFocus={focus} onRecordSelect={selectTimeline} />
-    {!loadAll || !following || working || fault || loadingHistory || historyFault ? <div className="history-controls">
-      {!loadAll ? <button type="button" disabled={page.indexing || working || !page.earlier}
-        onClick={() => void loadEarlier()}>{historyFailed ? '重试加载更早' : '加载更早'}</button> : null}
-      {!loadAll && page.later ? <button type="button" disabled={working} onClick={() => void fetchPage('after')}>加载更新</button> : null}
-      {!following || (!loadAll && page.later) ? <button type="button" disabled={working || (loadAll && page.later)}
-        onClick={returnToLatest}>回到最新{newRecords ? ` (${newRecords})` : ''}</button> : null}
-      {loadingHistory ? <span role="status">正在加载全部历史…</span> : null}
-      {historyFault ? <span role="alert">{historyFault} <button type="button" onClick={retryHistory}>重试加载历史</button></span> : null}
-      {working ? <span role="status">正在读取…</span> : null}
-      {historyFailed && !loadAll ? <span role="alert">{fault ?? '无法加载更早的记录。'}</span>
-        : fault ? <span role="alert">{fault} <button type="button" onClick={() => void fetchPage('recent')}>重试</button></span> : null}
-    </div> : null}
     <div className={ledger.split} onKeyDown={e => {
       if (e.key === 'Escape' && selectedEvent) close();
       else if (e.altKey && (e.key === 'ArrowUp' || e.key === 'ArrowDown')) {
@@ -505,11 +511,8 @@ export function Trajectory({ id, page, active, working, fault, fetchPage, metas,
         {turnBarVisible ? <div className="turn-bar" role="group" aria-label="轮次导航">
           <button type="button" className="turn-step" onClick={() => moveTurn(-1)}
             disabled={currentTurnIndex <= 0} aria-label="上一轮" title="上一轮 (Alt+↑)">‹</button>
-          <span className="turn-bar-label" title={currentGroup.turn ?? '日志未标记轮次'}>
-            <strong>{turnLabel(currentGroup)}</strong>
-            {clockTime(currentGroup.startedAt) ? <span className="turn-bar-time">{clockTime(currentGroup.startedAt)}</span> : null}
-            <span className="turn-bar-count">{currentGroup.events.length} 条</span>
-            {currentGroup.errorCount ? <span className="turn-bar-errors">{currentGroup.errorCount} 错误</span> : null}
+          <span className="turn-meta turn-bar-label" title={currentGroup.turn ?? '日志未标记轮次'}>
+            <TurnMeta group={currentGroup} />
           </span>
           <button type="button" className="turn-step" onClick={() => moveTurn(1)}
             disabled={currentTurnIndex >= visibleGroups.length - 1} aria-label="下一轮" title="下一轮 (Alt+↓)">›</button>
@@ -539,7 +542,7 @@ export function Trajectory({ id, page, active, working, fault, fetchPage, metas,
                   return (
                     <tr key={row.key} className="turn-heading" data-collapsed-summary data-turn-key={row.key}>
                       <td colSpan={2}><div className="turn-heading-row">
-                        <button type="button" className="turn-heading-collapse" aria-expanded={!row.folded}
+                        <button type="button" className="turn-meta turn-heading-collapse" aria-expanded={!row.folded}
                           title={row.group.turn ?? '日志未标记轮次'}
                           onClick={() => setCollapsed(current => {
                             const next = new Set(current);
@@ -548,10 +551,7 @@ export function Trajectory({ id, page, active, working, fault, fetchPage, metas,
                             return next;
                           })}>
                           <span aria-hidden="true">{row.folded ? '▸' : '▾'}</span>
-                          <span className="turn-heading-label">{turnLabel(row.group)}</span>
-                          {clockTime(row.group.startedAt) ? <span className="turn-heading-time">{clockTime(row.group.startedAt)}</span> : null}
-                          <span className="turn-count">{row.items.length} 条</span>
-                          {row.group.errorCount ? <span className="turn-heading-errors">{row.group.errorCount} 错误</span> : null}
+                          <TurnMeta group={row.group} />
                         </button>
                         <span className="turn-heading-nav">
                           <button type="button" className="turn-heading-step" disabled={groupIndex <= 0}
@@ -600,8 +600,10 @@ export function Trajectory({ id, page, active, working, fault, fetchPage, metas,
             </tbody>
           </table>
         </div>
-        {newRecords > 0 && !selectedEvent ? <button type="button" className="new-records" onClick={returnToLatest}>
-          {newRecords} 条新记录 <span aria-hidden="true">↓</span>
+        {!following || (!loadAll && page.later) ? <button type="button" className="return-to-latest"
+          aria-label="回到最新" title={newRecords ? `回到最新（${newRecords} 条新记录）` : '回到最新'}
+          disabled={working || (loadAll && page.later)} onClick={returnToLatest}>
+          <span aria-hidden="true">↓</span>
         </button> : null}
       </div>
       {selectedEvent && active ? <Inspector key={selectedEvent.source.offset} id={id} event={selectedEvent} close={close} openAgent={openAgent} /> : null}

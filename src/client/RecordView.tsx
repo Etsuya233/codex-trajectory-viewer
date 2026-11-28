@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useState, type ReactNode } from 'react';
 import type { AgentLink, DetailField, DetailPage, EventKind, SessionMeta, Source, TrajectoryEvent } from '../model.ts';
 import type { TrajectoryCellKind } from './dsh/trajectory-record.ts';
 import ledger from './dsh/TrajectoryTable.module.css';
@@ -49,63 +49,21 @@ function Status({ event }: { event: TrajectoryEvent }) {
   </span>;
 }
 
-function decodeJsonString(value: string) {
-  try {
-    return JSON.parse('"' + value + '"') as string;
-  } catch {
-    return value.replace(/\\n/g, '\n').replace(/\\t/g, '\t').replace(/\\"/g, '"').replace(/\\\\/g, '\\');
-  }
-}
-
-function jsonString(text: string, field: string) {
-  const match = new RegExp(`"${field}"\\s*:\\s*"((?:[^"\\\\]|\\\\.)*)"`).exec(text);
-  return match ? decodeJsonString(match[1]) : null;
-}
-
 function firstLine(value: string) {
   const line = value.replace(/\r?\n/g, ' ').replace(/\s+/g, ' ').trim();
   return line.length > 160 ? line.slice(0, 160) + '…' : line;
 }
 
-/** A short, tool-aware label for the request side of a tool row. */
 export function toolCallSummary(event: TrajectoryEvent) {
-  const preview = event.preview;
-  if (event.label === 'js' || event.label === 'exec') {
-    const title = jsonString(preview, 'title');
-    if (title) return title;
-    const code = jsonString(preview, 'code');
-    if (code) return firstLine(code);
-    if (event.label === 'js' && preview.startsWith('{')) {
-      const stripped = preview.replace(/^\{\s*"code"\s*:\s*"/, '').replace(/",\s*"title".*$/s, '');
-      if (stripped !== preview) return firstLine(decodeJsonString(stripped));
-    }
-  }
-  if (event.label === 'exec_command') {
-    const command = jsonString(preview, 'cmd');
-    if (command) return `$ ${firstLine(command)}`;
-    const marker = '"-Command", "';
-    const at = preview.indexOf(marker);
-    if (at >= 0) return `$ ${firstLine(preview.slice(at + marker.length).replace(/\\n/g, ' '))}`;
-  }
-  if (event.label === 'send_message') {
-    const target = jsonString(preview, 'target');
-    const message = jsonString(preview, 'message');
-    if (target) return `${target}${message ? ' · ' + firstLine(message) : ''}`;
-  }
-  return firstLine(preview);
+  return firstLine(event.preview);
 }
 
-/** Extract readable text or an image marker from a serialized tool result. */
 export function toolResultSummary(event: TrajectoryEvent) {
   if (!event.result) return '未见结果';
-  const exit = event.result.exitCode ?? event.processUpdates?.findLast(update => update.exitCode !== undefined)?.exitCode;
+  const exit = event.processUpdates?.findLast(update => update.exitCode !== undefined)?.exitCode ?? event.result.exitCode;
   if (event.result.status === 'running' && exit === undefined) return '运行中';
-  if (/input_image|data:image\//.test(event.result.preview)) return '图片结果';
-  const match = /"text"\s*:\s*"((?:[^"\\]|\\.)*)"/.exec(event.result.preview);
-  const text = match ? decodeJsonString(match[1]) : event.result.preview;
-  const output = text.indexOf('Output:');
-  const useful = output >= 0 ? text.slice(output + 'Output:'.length) : text;
-  return firstLine(useful) || '空结果';
+  const update = event.processUpdates?.findLast(result => result.preview !== '');
+  return firstLine(update?.preview || event.result.preview) || (event.result.outputMissing ? '未记录输出' : '空结果');
 }
 
 export function toolRunSummary(events: TrajectoryEvent[]) {
@@ -123,7 +81,7 @@ export function toolRunSummary(events: TrajectoryEvent[]) {
 export function Content({ event }: { event: TrajectoryEvent }) {
   if (event.kind === 'tool') {
     const duration = formatDuration(event.durationMs);
-    const exit = event.result?.exitCode ?? event.processUpdates?.findLast(update => update.exitCode !== undefined)?.exitCode;
+    const exit = event.processUpdates?.findLast(update => update.exitCode !== undefined)?.exitCode ?? event.result?.exitCode;
     const state = event.result?.status;
     const status = exit !== undefined && exit !== 0 ? `exit ${exit}`
       : state === 'error' ? '错误' : null;
@@ -165,28 +123,32 @@ function AgentOpenButton({ agent, openAgent }: { agent: AgentLink; openAgent: (i
   return <button type="button" title={label} onClick={() => openAgent(agent.id!)}>{label}</button>;
 }
 
-interface InspectorTab {
-  label: string;
+interface PayloadSource {
   source: Source;
   field: DetailField;
 }
 
+interface InspectorTab extends PayloadSource {
+  label: string;
+}
+
 export function Inspector({ id, event, close, openAgent }: { id: string; event: TrajectoryEvent; close: () => void; openAgent: (id: string) => void }) {
   const tabs: InspectorTab[] = [];
-  if (event.kind !== 'unknown') tabs.push({
-    label: event.kind === 'tool' ? '参数' : event.kind === 'result' ? '结果' : event.kind === 'reasoning' ? '思考摘要' : '内容',
-    source: event.source,
-    field: 'content',
-  });
-  if (event.kind === 'tool' && event.result) tabs.push({ label: '结果', source: event.result.source, field: event.result.detailField ?? 'content' });
-  for (const [index, update] of (event.processUpdates ?? []).entries()) {
-    tabs.push({ label: `后台输出 ${index + 1}`, source: update.source, field: update.detailField ?? 'content' });
+  if (event.kind === 'tool') {
+    tabs.push({ label: '详情', source: event.source, field: 'input' }, { label: '原始', source: event.source, field: 'raw' });
+  } else {
+    if (event.kind !== 'unknown') tabs.push({
+      label: event.kind === 'result' ? '结果' : event.kind === 'reasoning' ? '思考摘要' : '内容',
+      source: event.source,
+      field: 'content',
+    });
+    tabs.push({ label: '原始记录', source: event.source, field: 'raw' });
   }
-  tabs.push({ label: '原始记录', source: event.source, field: 'raw' });
-  if (event.kind === 'tool' && event.result) tabs.push({ label: '原始结果', source: event.result.source, field: 'raw' });
   const [active, setActive] = useState(tabs[0].label);
+  const [viewedRaw, setViewedRaw] = useState(false);
   const tab = tabs.find(entry => entry.label === active) ?? tabs[0];
   const timestamp = timeValue(event.timestamp);
+  const duration = formatDuration(event.durationMs);
 
   return (
     <aside className={ledger.details} aria-label="记录详情">
@@ -200,37 +162,109 @@ export function Inspector({ id, event, close, openAgent }: { id: string; event: 
       <div className="record-meta">
         {timestamp === null ? '无时间戳' : new Date(timestamp).toLocaleString('zh-CN', { hour12: false })}
         <Status event={event} />
+        {duration ? <span>{duration}</span> : null}
         {event.inherited ? <span>继承记录</span> : null}
         <span title="会话日志字节偏移">字节 {tab.source.offset.toLocaleString('zh-CN')}</span>
       </div>
       <div className={ledger.detailTabs} aria-label="详情视图">
         {tabs.map(entry => (
           <button type="button" key={entry.label} className={`${ledger.detailTab} ${entry === tab ? ledger.detailTabActive : ''}`}
-            aria-pressed={entry === tab} onClick={() => setActive(entry.label)}>{entry.label}</button>
+            aria-pressed={entry === tab} onClick={() => {
+              setActive(entry.label);
+              if (entry.field === 'raw') setViewedRaw(true);
+            }}>{entry.label}</button>
         ))}
       </div>
       {event.agents?.length ? <div className="record-meta">{event.agents.map((agent, index) =>
         agent.id ? <AgentOpenButton key={agent.id} agent={agent} openAgent={openAgent} />
           : <span key={index}>{agentLabel(agent)} · 无可用会话 ID</span>)}</div> : null}
-      {tab.source.digest ? <Payload key={`${tab.source.offset}:${tab.field}`} id={id} tab={tab} />
+      {event.kind === 'tool' ? <>
+        <ToolDetails id={id} event={event} hidden={tab.field === 'raw'} />
+        {viewedRaw ? <ToolDetails id={id} event={event} raw hidden={tab.field !== 'raw'} /> : null}
+      </> : tab.source.digest ? <Payload key={`${tab.source.offset}:${tab.field}`} id={id} source={tab.source} field={tab.field} />
         : <p className="payload">{event.problem}</p>}
     </aside>
   );
 }
 
-function Payload({ id, tab }: { id: string; tab: InspectorTab }) {
+function DetailSection({ label, initiallyOpen = false, children }: { label: string; initiallyOpen?: boolean; children: ReactNode }) {
+  const [state, setState] = useState({ open: initiallyOpen, loaded: initiallyOpen });
+  return <details className="detail-section" open={state.open} onToggle={event => {
+    const open = event.currentTarget.open;
+    setState(previous => previous.open === open ? previous : { open, loaded: previous.loaded || open });
+  }}>
+    <summary>{label}</summary>
+    {state.loaded ? children : null}
+  </details>;
+}
+
+function ToolDetails({ id, event, raw = false, hidden }: { id: string; event: TrajectoryEvent; raw?: boolean; hidden: boolean }) {
+  const outputs = [...(event.result ? [event.result] : []), ...(event.processUpdates ?? [])];
+  const outputRecords = new Map(outputs.map(result => [result.source.offset, result.source]));
+  outputRecords.delete(event.source.offset);
+  const pending = event.result?.status === 'running' && !event.processUpdates?.some(result => result.exitCode !== undefined);
+  return <div className="tool-details" hidden={hidden}>
+    <DetailSection label={raw ? '原始输入' : '输入'} initiallyOpen>
+      <Payload id={id} source={event.source} field={raw ? 'raw-input' : 'input'} copyable compact={!raw}
+        emptyText="日志未记录输入。" />
+    </DetailSection>
+    <DetailSection label={raw ? '原始输出' : '输出'} initiallyOpen={!raw}>
+      {outputs.length === 0 ? <p className="detail-empty">日志未记录结果。</p> : outputs.map((result, index) => (
+        <div className={outputs.length > 1 ? 'detail-output detail-output-caption' : 'detail-output'} key={`${result.source.offset}:${index}`}>
+          {outputs.length > 1 ? <p className="detail-source">{index === 0 && event.result ? '初始输出' : `后续输出 ${event.result ? index : index + 1}`}</p> : null}
+          {result.outputMissing ? <p className="detail-empty">{pending ? '运行中，尚无输出。' : '日志未记录输出。'}</p>
+            : <Payload id={id} source={result.source} field={raw ? 'raw-output' : 'output'} copyable
+              emptyText={pending ? '运行中，尚无输出。' : result.status === 'error' ? '执行失败，无文本输出。' : '已返回，无文本输出。'} />}
+        </div>
+      ))}
+    </DetailSection>
+    {raw ? <DetailSection label="JSONL 记录">
+      <div className="detail-output detail-output-caption">
+        <p className="detail-source">{event.result?.source.offset === event.source.offset ? '调用与结果' : '调用记录'}</p>
+        <Payload id={id} source={event.source} field="raw" copyable />
+      </div>
+      {[...outputRecords.values()].map(source => <div className="detail-output detail-output-caption" key={source.offset}>
+        <p className="detail-source">结果记录 · 字节 {source.offset.toLocaleString('zh-CN')}</p>
+        <Payload id={id} source={source} field="raw" copyable />
+      </div>)}
+    </DetailSection> : null}
+  </div>;
+}
+
+async function copyText(value: string) {
+  try { await navigator.clipboard.writeText(value); return; } catch {
+    const field = document.createElement('textarea');
+    const focused = document.activeElement;
+    field.value = value;
+    field.className = 'payload-copy-buffer';
+    document.body.append(field);
+    field.select();
+    try {
+      if (!document.execCommand('copy')) throw new Error('无法复制');
+    } finally {
+      field.remove();
+      if (focused instanceof HTMLElement) focused.focus({ preventScroll: true });
+    }
+  }
+}
+
+function Payload({ id, source, field, copyable = false, compact = false, emptyText = '此记录没有可显示的内容。' }:
+  PayloadSource & { id: string; copyable?: boolean; compact?: boolean; emptyText?: string }) {
   const [status, setStatus] = useState<'loading' | 'ready' | 'error'>('loading');
   const [error, setError] = useState('');
   const [page, setPage] = useState<DetailPage>({ text: '', next: 0 });
   const [from, setFrom] = useState(0);
   const [attempt, setAttempt] = useState(0);
-  const { offset, length, digest } = tab.source;
+  const [expanded, setExpanded] = useState(false);
+  const [copyState, setCopyState] = useState<'copied' | 'failed' | null>(null);
+  const { offset, length, digest } = source;
 
   useEffect(() => {
     const abort = new AbortController();
-    const query = new URLSearchParams({ offset: String(offset), length: String(length), digest, field: tab.field, from: String(from) });
+    const query = new URLSearchParams({ offset: String(offset), length: String(length), digest, field, from: String(from) });
     request<DetailPage>(`${sessionUrl(id)}/detail?${query}`, abort.signal)
       .then(next => {
+        if (abort.signal.aborted) return;
         setPage(current => ({ text: from === 0 ? next.text : current.text + next.text, next: next.next }));
         setStatus('ready');
       })
@@ -240,15 +274,30 @@ function Payload({ id, tab }: { id: string; tab: InspectorTab }) {
         setStatus('error');
       });
     return () => abort.abort();
-  }, [id, offset, length, digest, tab.field, from, attempt]);
+  }, [id, offset, length, digest, field, from, attempt]);
+
+  const longInput = compact && (page.text.length > 720 || page.text.split('\n', 9).length > 8);
+  const copyLabel = page.next === null ? '复制' : '复制已加载内容';
+  const copyFeedback = copyState === 'copied' ? '已复制' : copyState === 'failed' ? '复制失败' : '';
 
   return (
     <div className="payload">
-      {page.text ? <pre data-testid="payload-text">{page.text}</pre> : null}
-      {status === 'ready' && !page.text ? <p>此记录没有可显示的内容。</p> : null}
-      {status === 'ready' && page.next !== null ? (
-        <button type="button" onClick={() => { setStatus('loading'); setFrom(page.next!); }}>加载更多内容</button>
-      ) : null}
+      {page.text !== '' ? <>
+        {copyable ? <div className="payload-copy">
+          <span className={ledger.visuallyHidden} role="status">{copyFeedback}</span>
+          <button type="button" title={copyLabel} onClick={() => {
+            void copyText(page.text).then(() => setCopyState('copied'), () => setCopyState('failed'));
+          }}>{copyFeedback || copyLabel}</button>
+        </div> : null}
+        <pre data-testid="payload-text" className={longInput && !expanded ? 'payload-limited' : undefined}>{page.text}</pre>
+      </> : null}
+      {status === 'ready' && !page.text ? <p>{emptyText}</p> : null}
+      {longInput || (status === 'ready' && page.next !== null) ? <div className="payload-actions">
+        {longInput ? <button type="button" aria-expanded={expanded} onClick={() => setExpanded(value => !value)}>{expanded ? '收起' : '展开'}</button> : null}
+        {status === 'ready' && page.next !== null ? <button type="button" onClick={() => {
+          setStatus('loading'); setFrom(page.next!); setExpanded(true); setCopyState(null);
+        }}>加载更多内容</button> : null}
+      </div> : null}
       {status === 'loading' ? <p role="status">正在读取详情…</p> : null}
       {status === 'error' ? <p role="alert">{error} <button type="button" onClick={() => {
         setStatus('loading');

@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { findSession } from '../src/server/rollout.ts';
 import { readDetail, readRecent, RequestError } from '../src/server/session.ts';
+import { createTrajectoryApi } from '../src/server/api.ts';
 
 const sessionId = '00000000-0000-0000-0000-000000000001';
 const otherId = '00000000-0000-0000-0000-000000000002';
@@ -93,6 +94,51 @@ test('reads multi-chunk UTF-8 lines, pages detail without splitting a surrogate 
   const reasoning = (await readRecent(path)).events.at(-1)!;
   assert.equal(reasoning.kind, 'reasoning');
   assert.equal((await readDetail(path, reasoning.source, 'content', 0)).text, '已有摘要');
+});
+
+test('formats shell input and multipart tool output before truncation and retains the original fields', async context => {
+  const script = '$env:CODEX_EXAMPLE = "ok"\ngit commit -m "fixture"';
+  const argv = [`C:\\Program Files\\${'long-path-'.repeat(25)}\\pwsh.exe`, '-NoProfile', '-Command', script];
+  const stdout = 'Output:\n[main 0e4386d] fixture\n';
+  const shellRecord = JSON.stringify({ timestamp: stamp, type: 'event_msg', payload: { type: 'item_completed', item: {
+    type: 'CommandExecution', id: 'shell-v2', command: argv, status: 'completed', exit_code: 0, aggregated_output: stdout,
+  } } });
+  const js = 'await tools.exec_command({ cmd: "git add -- README.md" })';
+  const blocks = [
+    { type: 'input_text', text: 'Script completed\nWall time 0.2 seconds\nOutput:\n' },
+    { type: 'input_text', text: 'README.md | 1 +' },
+    { type: 'input_text', text: '1 file changed' },
+  ];
+  const legacyInput = JSON.stringify({ cmd: 'git add -- README.md', workdir: '/fixture' });
+  const { path, home, cleanup } = await fixture([
+    shellRecord,
+    item('custom_tool_call', { call_id: 'wrapper', name: 'exec', input: js }),
+    item('custom_tool_call_output', { call_id: 'wrapper', output: blocks }),
+    item('function_call', { call_id: 'legacy', name: 'exec_command', arguments: legacyInput }),
+    item('function_call_output', { call_id: 'legacy', output: 'Chunk ID: 1\nWall time: 0.1 seconds\nOutput:\n' }),
+  ]);
+  context.after(cleanup);
+  const api = createTrajectoryApi(home);
+  const [shell, outer, legacy] = (await readRecent(path)).events;
+  const detail = async (source: typeof shell.source, field: string) => {
+    const url = new URL(`/api/sessions/${sessionId}/detail`, 'http://localhost');
+    url.search = new URLSearchParams({ offset: String(source.offset), length: String(source.length), digest: source.digest, field, from: '0' }).toString();
+    return (await api(url) as { text: string }).text;
+  };
+  assert.equal(shell.preview, '$env:CODEX_EXAMPLE = "ok" git commit -m "fixture"');
+  assert.equal(await detail(shell.source, 'input'), script);
+  assert.equal(await detail(shell.source, 'output'), stdout);
+  assert.deepEqual(JSON.parse(await detail(shell.source, 'raw-input')), argv);
+  assert.equal(await detail(shell.source, 'raw-output'), stdout);
+  assert.equal(await detail(shell.source, 'raw'), shellRecord);
+  assert.equal(await detail(outer.source, 'input'), js);
+  assert.equal(outer.result?.preview, 'README.md | 1 + 1 file changed');
+  assert.equal(await detail(outer.result!.source, 'output'), 'README.md | 1 +\n\n1 file changed');
+  assert.deepEqual(JSON.parse(await detail(outer.result!.source, 'raw-output')), blocks);
+  assert.equal(legacy.preview, 'git add -- README.md');
+  assert.equal(await detail(legacy.source, 'raw-input'), legacyInput);
+  assert.equal(await detail(legacy.result!.source, 'output'), '');
+  assert.equal(legacy.result?.outputMissing, undefined);
 });
 
 test('limits the initial ledger and preserves a result whose call is outside it', async context => {
