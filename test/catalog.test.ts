@@ -100,6 +100,14 @@ test('resolves main and subagent metadata from the index and the child head', as
     id: child, name: 'Raman', kind: 'subagent', parentId: parent,
     agentPath: '/root/m1_sol', agentRole: 'worker', date: '2026-11-27T10-00-00', archived: false,
   });
+  await log.index([
+    { id: parent, name: '评估轨迹查看器', updated_at: '2026-11-27T11:00:00Z' },
+    { id: child, name: '子代理会话', updated_at: '2026-11-27T11:00:00Z' },
+  ]);
+  assert.deepEqual(await catalog.meta(child), {
+    id: child, name: 'Raman', kind: 'subagent', parentId: parent,
+    agentPath: '/root/m1_sol', agentRole: 'worker', date: '2026-11-27T10-00-00', archived: false,
+  });
 });
 
 test('fills subagent nicknames from child heads and leaves unresolved links untouched', async context => {

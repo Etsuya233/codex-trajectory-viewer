@@ -377,7 +377,7 @@ export class SessionIndex {
     }
   }
 
-  page(before?: number, around?: number, after?: number): IndexedPage {
+  page(before?: number, around?: number, after?: number, limit = PAGE_SIZE): IndexedPage {
     let start = 0;
     let end = this.ordered.length;
     const slice = (cursor: number, direction: -1 | 1, limit: number) => {
@@ -395,10 +395,10 @@ export class SessionIndex {
       events = [...slice(position - 1, -1, 24).reverse(), ...slice(position, 1, 26)];
     } else if (after !== undefined) {
       start = bound(this.ordered, after, true);
-      events = slice(start, 1, PAGE_SIZE);
+      events = slice(start, 1, limit);
     } else {
       if (before !== undefined) end = bound(this.ordered, before);
-      events = slice(end - 1, -1, PAGE_SIZE).reverse();
+      events = slice(end - 1, -1, limit).reverse();
     }
     const first = events[0]?.source.offset;
     const last = events.at(-1)?.source.offset;

@@ -51,7 +51,10 @@ export function createTrajectoryApi(codexHome: string) {
     if (endpoint !== 'updates' && generation && generation !== index.generation) {
       throw new RequestError(409, '日志已替换，请刷新会话。');
     }
-    if (!endpoint) return index.page(before, around, after);
+    if (!endpoint) {
+      const limit = search.has('limit') ? requiredInteger(search, 'limit', 1, 250) : undefined;
+      return index.page(before, around, after, limit);
+    }
     if (endpoint === 'stats') return index.statistics();
     if (endpoint === 'agents') return catalog.resolveAgents(index.agentLinks());
     if (endpoint === 'updates') {

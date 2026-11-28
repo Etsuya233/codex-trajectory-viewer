@@ -126,30 +126,6 @@
   width: auto;
 }
 
-.table th {
-  position: sticky;
-  top: 0;
-  z-index: 3;
-  box-sizing: border-box;
-  height: 30px;
-  padding: 0 8px;
-  overflow: hidden;
-  border-bottom: 0.5px solid var(--dsw-alias-border-l2);
-  color: var(--dsw-alias-label-tertiary);
-  background: var(--dsw-specific-sidebar-fill);
-  font: var(--dsw-font-xxs-12);
-  font-weight: 500;
-  text-align: left;
-  text-overflow: ellipsis;
-  user-select: none;
-  white-space: nowrap;
-}
-
-.eventHeader {
-  padding-right: 4px !important;
-  text-align: right !important;
-}
-
 .table td {
   box-sizing: border-box;
   height: 30px;

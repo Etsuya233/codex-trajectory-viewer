@@ -1,9 +1,10 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
-import type { IndexedPage, TrajectoryEvent } from '../model.ts';
+import type { IndexedPage, SessionMeta, TrajectoryEvent } from '../model.ts';
 import { sessionUrl } from './api.ts';
 import { clockTime } from './format.ts';
 import { Content, hasError, Inspector, KindTag, kindStyles, timeValue, toolCallSummary, toolRunSummary } from './RecordView.tsx';
 import { AgentMenu, SessionSearch, Statistics } from './SessionTools.tsx';
+import { SettingsMenu, type SettingsMenuProps } from './SettingsMenu.tsx';
 import { Dropdown } from './Dropdown.tsx';
 import { TrajectoryTimeline } from './dsh/TrajectoryTimeline.tsx';
 import { trajectoryTimelineFocusIndexes } from './dsh/timeline.ts';
@@ -86,20 +87,25 @@ interface Props {
   working: boolean;
   fault: string | null;
   fetchPage: (direction: 'before' | 'after' | 'around' | 'recent', offset?: number) => Promise<boolean>;
+  metas: ReadonlyMap<string, SessionMeta>;
+  preferences: SettingsMenuProps;
+  loadAll: boolean;
+  historyFault: string | null;
+  loadingHistory: boolean;
+  retryHistory: () => void;
   openAgent: (id: string) => void;
+  openMainAgent: (id: string) => void;
 }
 
-export function Trajectory({ id, page, active, working, fault, fetchPage, openAgent }: Props) {
+export function Trajectory({ id, page, active, working, fault, fetchPage, metas, preferences, loadAll,
+  historyFault, loadingHistory, retryHistory, openAgent, openMainAgent }: Props) {
   const groups = useMemo(() => groupEvents(page.events), [page.events]);
   const [selected, setSelected] = useState<number | null>(null);
   const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
   const [expandedTools, setExpandedTools] = useState<Set<string>>(new Set());
   const [query, setQuery] = useState('');
-  const [tool, setTool] = useState('');
   const [errorsOnly, setErrorsOnly] = useState(false);
-  const [scope, setScope] = useState<'loaded' | 'all'>('loaded');
   const [statistics, setStatistics] = useState(() => !narrowLayout());
-  const [filtersOpen, setFiltersOpen] = useState(false);
   const [historyFailed, setHistoryFailed] = useState(false);
   const [mode, setMode] = useState<TrajectoryTimelineMode>('sequence');
   const [range, setRange] = useState<TrajectoryTimeRange | null>(null);
@@ -115,40 +121,31 @@ export function Trajectory({ id, page, active, working, fault, fetchPage, openAg
   const follow = useRef(true);
   const previousTop = useRef(0);
   const earliestRequest = useRef<symbol | null>(null);
-  const restoreFocus = useRef(false);
+  const rowFocusTarget = useRef<number | null>(null);
   const seenLatest = useRef<number | null>(null);
   const selectedEvent = page.events.find(event => event.source.offset === selected);
-  const hasQuery = scope === 'loaded' && (query.trim() !== '' || tool.trim() !== '' || errorsOnly);
-
-  const matches = useMemo(() => {
-    if (!hasQuery) return null;
-    const term = query.trim().toLowerCase();
-    const toolName = tool.trim().toLowerCase();
-    return new Set(page.events.filter(event =>
-      (!errorsOnly || hasError(event))
-      && (!toolName || (event.kind === 'tool' && event.label.toLowerCase().includes(toolName)))
-      && `${event.label} ${event.preview} ${event.result?.preview ?? ''}`.toLowerCase().includes(term),
-    ).map(event => event.source.offset));
-  }, [hasQuery, errorsOnly, page.events, query, tool]);
+  const term = query.trim();
+  const searching = term !== '' || errorsOnly;
+  const { foldTools, keepLatestOpen } = preferences.settings;
+  const openTail = keepLatestOpen && !page.later ? groups.at(-1) : undefined;
 
   const rows = useMemo<Row[]>(() => groups.flatMap(group => {
-    const items = matches === null ? group.events : group.events.filter(item => matches.has(item.source.offset));
-    if (!items.length) return [];
+    const items = group.events;
     const folded = collapsed.has(group.key);
     const header: TurnRow = { key: group.key, items, folded, group, turnKey: group.key };
     if (folded) return [header];
     const body: Row[] = [];
-    const canFoldTools = matches === null;
     for (let index = 0; index < items.length; index++) {
       const event = items[index];
-      if (canFoldTools && event.kind === 'tool') {
+      if (foldTools && event.kind === 'tool') {
         let end = index;
         while (end + 1 < items.length && items[end + 1].kind === 'tool') end++;
         if (end - index + 1 >= TOOL_RUN_MINIMUM) {
           const run = items.slice(index, end + 1);
-          const key = 'tools:' + run[0].source.offset;
-          const expanded = expandedTools.has(key) || run.some(item => item.source.offset === reveal);
-          body.push({ key, events: run, turnKey: group.key, folded: !expanded });
+          const key = 'tools:' + event.source.offset;
+          const open = openTail === group && end === items.length - 1;
+          const expanded = open || expandedTools.has(key) || run.some(item => item.source.offset === reveal);
+          if (!open) body.push({ key, events: run, turnKey: group.key, folded: !expanded });
           if (expanded) body.push(...run.map(item => ({ key: item.source.offset, event: item, turnKey: group.key })));
           index = end;
           continue;
@@ -157,7 +154,7 @@ export function Trajectory({ id, page, active, working, fault, fetchPage, openAg
       body.push({ key: event.source.offset, event, turnKey: group.key });
     }
     return [header, ...body];
-  }), [collapsed, expandedTools, groups, matches, reveal]);
+  }), [collapsed, expandedTools, foldTools, groups, openTail, reveal]);
   const rowIndex = useMemo(() => new Map(rows.map((row, index) => [row.key, index])), [rows]);
   const visibleGroups = useMemo(() => rows.filter((row): row is TurnRow => 'items' in row), [rows]);
 
@@ -169,10 +166,6 @@ export function Trajectory({ id, page, active, working, fault, fetchPage, openAg
   }, [groups, visibleRow]);
   const currentTurnIndex = currentGroup ? visibleGroups.findIndex(row => row.key === currentGroup.key) : -1;
   const currentHeaderIndex = currentGroup ? rowIndex.get(currentGroup.key) : undefined;
-  const currentCount = currentGroup
-    ? matches === null ? currentGroup.events.length
-      : currentGroup.events.filter(event => matches.has(event.source.offset)).length
-    : 0;
   const turnBarVisible = currentGroup !== null && currentTurnIndex >= 0
     && currentHeaderIndex !== undefined && viewport.first > currentHeaderIndex && !turnHeaderVisible;
 
@@ -218,10 +211,8 @@ export function Trajectory({ id, page, active, working, fault, fetchPage, openAg
       return;
     }
     const paneRect = element.getBoundingClientRect();
-    const headRect = element.querySelector('thead')?.getBoundingClientRect();
     const headerRect = header.getBoundingClientRect();
-    const top = Math.max(paneRect.top, headRect?.bottom ?? paneRect.top);
-    const visible = headerRect.bottom > top && headerRect.top < paneRect.bottom;
+    const visible = headerRect.bottom > paneRect.top && headerRect.top < paneRect.bottom;
     setTurnHeaderVisible(current => current === visible ? current : visible);
   }, [currentGroup, rows, viewport]);
 
@@ -327,25 +318,20 @@ export function Trajectory({ id, page, active, working, fault, fetchPage, openAg
       return next;
     });
     const at = group.events.findIndex(item => item.source.offset === offset);
-    if (at >= 0 && group.events[at].kind === 'tool') {
+    if (foldTools && at >= 0 && group.events[at].kind === 'tool') {
       let start = at;
       while (start > 0 && group.events[start - 1].kind === 'tool') start--;
       let end = at;
       while (end + 1 < group.events.length && group.events[end + 1].kind === 'tool') end++;
-      if (end - start + 1 >= TOOL_RUN_MINIMUM) {
+      if (end - start + 1 >= TOOL_RUN_MINIMUM && (openTail !== group || end !== group.events.length - 1)) {
         const key = 'tools:' + group.events[start].source.offset;
         setExpandedTools(current => current.has(key) ? current : new Set(current).add(key));
       }
     }
-    if (matches && !matches.has(offset)) {
-      setQuery('');
-      setTool('');
-      setErrorsOnly(false);
-    }
     follow.current = false;
     setFollowing(false);
     setFocusRequest(offset);
-  }, [groups, matches]);
+  }, [foldTools, groups, openTail]);
 
   const selectTimeline = useCallback((offset: number) => {
     setSelected(offset);
@@ -363,8 +349,8 @@ export function Trajectory({ id, page, active, working, fault, fetchPage, openAg
   }
 
   async function loadEarlier(automatic = false) {
-    if (!active || page.indexing || !page.earlier || working || earliestRequest.current !== null) return;
-    if (automatic && (historyFailed || fault || hasQuery || scope !== 'loaded' || range !== null)) return;
+    if (loadAll || !active || page.indexing || !page.earlier || working || earliestRequest.current !== null) return;
+    if (automatic && (historyFailed || fault || searching || range !== null)) return;
     const request = Symbol();
     earliestRequest.current = request;
     follow.current = false;
@@ -382,7 +368,7 @@ export function Trajectory({ id, page, active, working, fault, fetchPage, openAg
     setFollowing(true);
     setNewRecords(0);
     seenLatest.current = page.events.at(-1)?.source.offset ?? null;
-    if (page.later) void fetchPage('recent');
+    if (page.later && !loadAll) void fetchPage('recent');
     else if (pane.current) scrollTo(pane.current, pane.current.scrollHeight);
   }
 
@@ -419,20 +405,17 @@ export function Trajectory({ id, page, active, working, fault, fetchPage, openAg
     }
     setReveal(offset);
     setSelected(offset);
+    rowFocusTarget.current = offset;
     setFocusRequest(offset);
-    setScope('loaded');
-    setQuery('');
-    setTool('');
-    setErrorsOnly(false);
     setRange(null);
   }
 
   function close() {
     if (selected !== null) {
-      const element = pane.current?.querySelector<HTMLElement>(`[data-row-offset="${selected}"]`);
+      const element = pane.current?.querySelector<HTMLElement>(`[data-trajectory-record][data-row-offset="${selected}"]`);
       if (element) element.focus();
       else if (rowIndex.has(selected)) {
-        restoreFocus.current = true;
+        rowFocusTarget.current = selected;
         setFocusRequest(selected);
       }
     }
@@ -440,10 +423,15 @@ export function Trajectory({ id, page, active, working, fault, fetchPage, openAg
   }
 
   useLayoutEffect(() => {
-    if (!restoreFocus.current || focusRequest !== null) return;
-    pane.current?.querySelector<HTMLElement>(`[data-row-offset="${rows[viewport.first]?.key}"]`)?.focus();
-    restoreFocus.current = false;
-  }, [focusRequest, rows, viewport.first]);
+    if (!active || rowFocusTarget.current === null || focusRequest !== null) return;
+    const target = pane.current?.querySelector<HTMLElement>(`[data-trajectory-record][data-row-offset="${rowFocusTarget.current}"]`);
+    if (!target) return;
+    const inspectorClose = selected !== null && narrowLayout()
+      ? pane.current?.closest(`.${ledger.split}`)?.querySelector<HTMLElement>('[aria-label="关闭详情"]')
+      : null;
+    (inspectorClose ?? target).focus({ preventScroll: true });
+    rowFocusTarget.current = null;
+  }, [active, focusRequest, rows, selected, viewport.first]);
 
   // For the small initial snapshot keep the DOM stable. History uses a fixed-height virtual table.
   const start = rows.length <= 65 ? 0 : Math.max(0, viewport.first - OVERSCAN);
@@ -461,29 +449,25 @@ export function Trajectory({ id, page, active, working, fault, fetchPage, openAg
             onClick={() => { setMode('sequence'); setRange(null); }}>事件顺序</button>
           <button className={toolbar.toggle} type="button" aria-pressed={mode === 'actual'}
             onClick={() => { setMode('actual'); setRange(null); }}>记录时间</button>
-          <button className={toolbar.toggle} type="button" aria-pressed={errorsOnly}
-            onClick={() => setErrorsOnly(current => !current)}>仅错误</button>
           <button className={toolbar.toggle} type="button" aria-pressed={statistics}
             onClick={() => setStatistics(current => !current)}>统计</button>
-          <Dropdown className={`${toolbar.toggle} dropdown-trigger`} ariaLabel="子代理" title="子代理" active={active}
-            minWidth={300} maxWidth={460} label={<span>子代理</span>}>
+          <Dropdown className={`${toolbar.toggle} dropdown-trigger`} ariaLabel="代理" title="代理" active={active}
+            minWidth={300} maxWidth={460} label={<span>代理</span>}>
             {close => <AgentMenu id={id} generation={page.generation} revision={page.revision}
-              openAgent={openAgent} close={close} />}
+              metas={metas} openAgent={openAgent} openMainAgent={openMainAgent} close={close} />}
+          </Dropdown>
+          <Dropdown className={`${toolbar.toggle} dropdown-trigger`} ariaLabel="全局设置" title="全局设置" active={active}
+            minWidth={250} maxWidth={300} label={<span>设置</span>}>
+            {() => <SettingsMenu {...preferences} />}
           </Dropdown>
         </div>
-        <input className="trajectory-search" type="search" aria-label={scope === 'loaded' ? '搜索已加载的摘要' : '搜索全会话'}
-          placeholder={scope === 'loaded' ? '搜索已加载的摘要' : '搜索全会话'} value={query} onChange={e => setQuery(e.currentTarget.value)} />
-        <button type="button" className="filter-toggle" aria-expanded={filtersOpen}
-          data-active={scope === 'all' || tool.trim() !== '' || errorsOnly ? 'true' : undefined}
-          onClick={() => setFiltersOpen(current => !current)}>筛选</button>
-        <div className="trajectory-filters" data-open={filtersOpen || undefined}>
-          <select className="scope-select" aria-label="搜索范围" value={scope} onChange={event => setScope(event.currentTarget.value as typeof scope)}>
-            <option value="loaded">已加载摘要</option><option value="all">全会话</option>
-          </select>
-          <input className="trajectory-search tool-filter" type="search" aria-label="筛选工具名"
-            placeholder="工具名" value={tool} onChange={e => setTool(e.currentTarget.value)} />
+        <div className="trajectory-search-group">
+          <input className="trajectory-search" type="search" aria-label="搜索轨迹"
+            placeholder="搜索轨迹" value={query} onChange={event => setQuery(event.currentTarget.value)} />
+          <button className={toolbar.toggle} type="button" aria-pressed={errorsOnly}
+            onClick={() => setErrorsOnly(current => !current)}>仅错误</button>
         </div>
-        <span className="record-count" role="status">{matches ? `${matches.size} / ` : ''}{page.events.length} 条记录</span>
+        <span className="record-count" role="status">{page.events.length} 条记录</span>
         <span className="live-status" data-state={liveState} title={fault ? fault : '每 1.5 秒检查新记录'}>
           <span className="live-dot" aria-hidden="true" />{liveState === 'fault' ? '离线' : liveState === 'busy' ? '同步中' : '实时'}
         </span>
@@ -493,20 +477,23 @@ export function Trajectory({ id, page, active, working, fault, fetchPage, openAg
       </div>
     </section>
     {statistics && active ? <Statistics id={id} revision={page.revision} /> : null}
-    {scope === 'all' && active ? <SessionSearch key={JSON.stringify([page.generation, query, tool, errorsOnly])} id={id}
-      generation={page.generation} term={query} tool={tool}
-      errors={errorsOnly} select={jump} disabled={working} /> : null}
+    {searching ? <SessionSearch key={JSON.stringify([page.generation, term, errorsOnly])} id={id}
+      active={active} generation={page.generation} term={term} errors={errorsOnly}
+      selected={selected} select={jump} disabled={working} /> : null}
     <TrajectoryTimeline t={translate} turns={timeline} mode={mode} range={range} onRangeChange={setRange}
-      selectedIndex={selected} searchMatchIndexes={matches} onRecordFocus={focus} onRecordSelect={selectTimeline} />
-    <div className="history-controls">
-      <button type="button" disabled={page.indexing || working || !page.earlier}
-        onClick={() => void loadEarlier()}>{historyFailed ? '重试加载更早' : '加载更早'}</button>
-      {page.later ? <button type="button" disabled={working} onClick={() => void fetchPage('after')}>加载更新</button> : null}
-      {page.later || !following ? <button type="button" disabled={working} onClick={returnToLatest}>回到最新{newRecords ? ` (${newRecords})` : ''}</button> : null}
+      selectedIndex={selected} onRecordFocus={focus} onRecordSelect={selectTimeline} />
+    {!loadAll || !following || working || fault || loadingHistory || historyFault ? <div className="history-controls">
+      {!loadAll ? <button type="button" disabled={page.indexing || working || !page.earlier}
+        onClick={() => void loadEarlier()}>{historyFailed ? '重试加载更早' : '加载更早'}</button> : null}
+      {!loadAll && page.later ? <button type="button" disabled={working} onClick={() => void fetchPage('after')}>加载更新</button> : null}
+      {!following || (!loadAll && page.later) ? <button type="button" disabled={working || (loadAll && page.later)}
+        onClick={returnToLatest}>回到最新{newRecords ? ` (${newRecords})` : ''}</button> : null}
+      {loadingHistory ? <span role="status">正在加载全部历史…</span> : null}
+      {historyFault ? <span role="alert">{historyFault} <button type="button" onClick={retryHistory}>重试加载历史</button></span> : null}
       {working ? <span role="status">正在读取…</span> : null}
-      {historyFailed ? <span role="alert">{fault ?? '无法加载更早的记录。'}</span>
+      {historyFailed && !loadAll ? <span role="alert">{fault ?? '无法加载更早的记录。'}</span>
         : fault ? <span role="alert">{fault} <button type="button" onClick={() => void fetchPage('recent')}>重试</button></span> : null}
-    </div>
+    </div> : null}
     <div className={ledger.split} onKeyDown={e => {
       if (e.key === 'Escape' && selectedEvent) close();
       else if (e.altKey && (e.key === 'ArrowUp' || e.key === 'ArrowDown')) {
@@ -521,7 +508,7 @@ export function Trajectory({ id, page, active, working, fault, fetchPage, openAg
           <span className="turn-bar-label" title={currentGroup.turn ?? '日志未标记轮次'}>
             <strong>{turnLabel(currentGroup)}</strong>
             {clockTime(currentGroup.startedAt) ? <span className="turn-bar-time">{clockTime(currentGroup.startedAt)}</span> : null}
-            <span className="turn-bar-count">{matches ? `${currentCount} / ${currentGroup.events.length}` : currentGroup.events.length} 条</span>
+            <span className="turn-bar-count">{currentGroup.events.length} 条</span>
             {currentGroup.errorCount ? <span className="turn-bar-errors">{currentGroup.errorCount} 错误</span> : null}
           </span>
           <button type="button" className="turn-step" onClick={() => moveTurn(1)}
@@ -544,7 +531,6 @@ export function Trajectory({ id, page, active, working, fault, fetchPage, openAg
         }}>
           <table ref={table} className={ledger.table} data-scroll-ready="true" aria-label="会话轨迹">
             <colgroup><col className={ledger.eventColumn} /><col className={ledger.contentColumn} /></colgroup>
-            <thead><tr><th className={ledger.eventHeader} scope="col">事件</th><th scope="col">内容</th></tr></thead>
             <tbody>
               {spacer(start)}
               {rows.slice(start, end).map(row => {
@@ -609,7 +595,7 @@ export function Trajectory({ id, page, active, working, fault, fetchPage, openAg
               })}
               {spacer(rows.length - end)}
               {rows.length === 0 ? <tr><td colSpan={2} className="history-note">
-                {hasQuery ? '没有匹配的记录。' : '没有可显示的完整记录。'}
+                没有可显示的完整记录。
               </td></tr> : null}
             </tbody>
           </table>

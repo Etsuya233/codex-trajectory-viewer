@@ -141,8 +141,6 @@ export interface TrajectoryTimelineProps {
   /** Load one earlier history page from the truncation control. */
   onLoadEarlier?: () => Promise<boolean>
   selectedIndex?: number | null
-  /** Record indexes matching the active ledger search, or null without a query. */
-  searchMatchIndexes?: ReadonlySet<number> | null
   onRangeChange: (range: TrajectoryTimeRange | null) => void
   /** Select a directly clicked timeline block. */
   onRecordSelect?: (index: number) => void
@@ -246,7 +244,6 @@ export const TrajectoryTimeline = memo(function TrajectoryTimeline({
   hasEarlierRecords = false,
   onLoadEarlier,
   selectedIndex = null,
-  searchMatchIndexes = null,
   onRangeChange,
   onRecordSelect,
   onRecordFocus,
@@ -710,9 +707,6 @@ export const TrajectoryTimeline = memo(function TrajectoryTimeline({
                       data-equal-duration={mode === 'time' || undefined}
                       data-current={span.index === selectedIndex || undefined}
                       data-hovered={hover?.recordIndex === span.index || undefined}
-                      data-search-match={searchMatchIndexes === null
-                        ? undefined
-                        : searchMatchIndexes.has(span.index) ? 'true' : 'false'}
                       data-selected={activeRange === null
                         ? undefined
                         : span.start <= activeRange.end && span.end >= activeRange.start

@@ -4,6 +4,7 @@ export const MCP_OPEN = 'open_local_trajectory_viewer';
 export const MCP_SHOW = 'show_local_trajectory_viewer';
 export const MCP_CONTEXT = 'local_trajectory_context';
 export const MCP_READ = 'local_trajectory_read';
+export const MCP_SETTINGS = 'local_trajectory_settings';
 
 export type PanelContext =
   | { mode: 'host-thread'; sessionId: string }

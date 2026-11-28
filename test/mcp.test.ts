@@ -6,7 +6,7 @@ import { test } from 'node:test';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
-import { MCP_CONTEXT, MCP_OPEN, MCP_READ, MCP_SHOW, MCP_UI_MIME, MCP_UI_URI } from '../src/mcp-contract.ts';
+import { MCP_CONTEXT, MCP_OPEN, MCP_READ, MCP_SETTINGS, MCP_SHOW, MCP_UI_MIME, MCP_UI_URI } from '../src/mcp-contract.ts';
 import { createTrajectoryApi } from '../src/server/api.ts';
 import { callingThread, createMcpBridge } from '../src/server/mcp-bridge.ts';
 
@@ -46,6 +46,7 @@ test('MCP SDK discovers the native UI resource and returns only opening text wit
   assert.deepEqual(opener._meta?.['openai/ui'], { entrypoints: [{ type: 'thread' }] });
   assert.deepEqual(opener._meta?.ui, { resourceUri: MCP_UI_URI, visibility: ['app'] });
   assert.deepEqual(available.tools.find(tool => tool.name === MCP_READ)?._meta?.ui, { visibility: ['app'] });
+  assert.deepEqual(available.tools.find(tool => tool.name === MCP_SETTINGS)?._meta?.ui, { visibility: ['app'] });
   assert.deepEqual((await client.listResources()).resources.map(entry => [entry.uri, entry.mimeType]), [[MCP_UI_URI, MCP_UI_MIME]]);
   const resource = (await client.readResource({ uri: MCP_UI_URI })).contents[0];
   assert.ok('text' in resource);
@@ -62,6 +63,30 @@ test('MCP SDK discovers the native UI resource and returns only opening text wit
   const bootstrap = await client.callTool({ name: MCP_CONTEXT, arguments: {}, _meta: { threadId: session } }) as CallToolResult;
   assert.deepEqual(bootstrap._meta?.trajectoryContext, opened._meta?.trajectoryContext);
   await assert.rejects(client.callTool({ name: MCP_SHOW, arguments: { sessionId: session } }));
+});
+
+test('settings are shared across panels while only the declared preferences can be saved', async context => {
+  const home = await mkdtemp(join(tmpdir(), 'trajectory-settings-'));
+  context.after(() => rm(home, { recursive: true, force: true }));
+  const connect = async () => {
+    const server = createMcpBridge(home, async () => testHtml);
+    const client = new Client({ name: 'panel-test', version: '1.0.0' });
+    const [view, host] = InMemoryTransport.createLinkedPair();
+    await server.connect(host);
+    await client.connect(view);
+    context.after(async () => { await client.close(); await server.close(); });
+    return async (args: Record<string, unknown> = {}) => {
+      const result = await client.callTool({ name: MCP_SETTINGS, arguments: args }) as CallToolResult;
+      return result._meta?.trajectoryResponse;
+    };
+  };
+  const [first, second] = await Promise.all([connect(), connect()]);
+  assert.deepEqual(await first(), { data: { foldTools: true, keepLatestOpen: true, loadAll: true } });
+  assert.deepEqual(await Promise.all([
+    first({ key: 'foldTools', value: false }), second({ key: 'loadAll', value: false }),
+  ]), [{ data: null }, { data: null }]);
+  assert.deepEqual(await second(), { data: { foldTools: false, keepLatestOpen: true, loadAll: false } });
+  assert.deepEqual(await first({ key: '../config.toml', value: true }), { error: '无效的查看器设置。' });
 });
 
 test('panel reads the same summaries and detailed sources through app-only private metadata', async context => {

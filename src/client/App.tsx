@@ -1,8 +1,10 @@
 import { useEffect, useRef, useState } from 'react';
 import type { SessionMeta } from '../model.ts';
-import { request, sessionUrl } from './api.ts';
+import type { SettingChange, ViewerSettings } from '../settings.ts';
+import { errorMessage, request, sessionUrl } from './api.ts';
 import { Dropdown } from './Dropdown.tsx';
 import { SessionMenu, sessionLabel } from './SessionTools.tsx';
+import { readBrowserSettings, writeBrowserSettings, type SettingsMenuProps } from './SettingsMenu.tsx';
 import { Trajectory } from './Trajectory.tsx';
 import { applyTheme, initialTheme, rememberTheme, storedTheme, type Theme } from './theme.ts';
 import { useTrajectory } from './useTrajectory.ts';
@@ -27,14 +29,19 @@ function writeLastSession(id: string) {
   }
 }
 
-function LoadedSession({ id, active, openAgent, onChoose }: {
+function LoadedSession({ id, active, metas, preferences, openAgent, openMainAgent, onChoose }: {
   id: string;
   active: boolean;
+  metas: ReadonlyMap<string, SessionMeta>;
+  preferences: SettingsMenuProps;
   openAgent: (id: string) => void;
+  openMainAgent: (id: string) => void;
   onChoose: () => void;
 }) {
-  const { page, fault, working, fetchPage, viewEpoch } = useTrajectory(id, active);
-  if (page) return <Trajectory key={viewEpoch} {...{ id, page, active, working, fault, fetchPage, openAgent }} />;
+  const loadAll = preferences.settings.loadAll && metas.get(id)?.kind === 'thread';
+  const { page, fault, working, fetchPage, viewEpoch, historyFault, loadingHistory, retryHistory } = useTrajectory(id, active, loadAll);
+  if (page) return <Trajectory key={viewEpoch}
+    {...{ id, page, active, working, fault, fetchPage, metas, preferences, loadAll, historyFault, loadingHistory, retryHistory, openAgent, openMainAgent }} />;
   if (fault) return <p className="empty" role="alert">{fault}
     <button type="button" onClick={() => void fetchPage('recent')}>重试</button>
     <button type="button" onClick={onChoose}>选择其他会话</button>
@@ -65,7 +72,10 @@ function subagentLabel(meta: SessionMeta) {
   return name || path || meta.id.slice(0, 8);
 }
 
-function Welcome({ open }: { open: (id: string) => void }) {
+function Welcome({ open, openCurrentChat }: {
+  open: (id: string, name?: string | null) => void;
+  openCurrentChat?: () => void;
+}) {
   return <section className="welcome">
     <div className="welcome-card">
       <div className="welcome-intro">
@@ -73,7 +83,7 @@ function Welcome({ open }: { open: (id: string) => void }) {
         <p>从本机只读日志读取轮次、工具调用和结果。选择下面的会话，或按 UUID 直接打开。</p>
       </div>
       <div className="welcome-picker">
-        <SessionMenu current="" choose={open} />
+        <SessionMenu current="" choose={open} chooseCurrentChat={openCurrentChat} />
       </div>
       <p className="welcome-hint">会话列表只读取索引元数据；打开后才读取轨迹。</p>
     </div>
@@ -84,11 +94,14 @@ interface AppProps {
   embedded?: boolean;
   hostSession?: string;
   hostTheme?: Theme;
+  initialSettings?: ViewerSettings;
+  saveSetting?: (change: SettingChange) => Promise<void>;
 }
 
-export function App({ embedded = false, hostSession, hostTheme }: AppProps) {
+export function App({ embedded = false, hostSession, hostTheme, initialSettings, saveSetting }: AppProps) {
+  const currentChatId = embedded && hostSession && SESSION_ID.test(hostSession) ? hostSession.toLowerCase() : undefined;
   const [stack, setStack] = useState(() => {
-    if (embedded) return hostSession ? [hostSession] : [];
+    if (embedded) return currentChatId ? [currentChatId] : [];
     const current = currentStack();
     if (current.length) return current;
     const last = readLastSession();
@@ -98,7 +111,29 @@ export function App({ embedded = false, hostSession, hostTheme }: AppProps) {
   const [reload, setReload] = useState(0);
   const metaCache = useRef(new Map<string, SessionMeta>());
   const [metas, setMetas] = useState<ReadonlyMap<string, SessionMeta>>(new Map());
+  const [selectedTitles, setSelectedTitles] = useState<ReadonlyMap<string, string>>(new Map());
   const [theme, setTheme] = useState<Theme>(() => hostTheme ?? initialTheme());
+  const [settings, setSettings] = useState(() => initialSettings ?? readBrowserSettings());
+  const [saving, setSaving] = useState(false);
+  const [settingsError, setSettingsError] = useState<string | null>(null);
+
+  async function changeSetting(change: SettingChange) {
+    if (saving) return;
+    setSettingsError(null);
+    setSaving(true);
+    try {
+      const next = { ...settings, [change.key]: change.value };
+      if (saveSetting) await saveSetting(change);
+      else writeBrowserSettings(next);
+      setSettings(next);
+    } catch (error) {
+      setSettingsError(errorMessage(error));
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  const preferences = { settings, changeSetting, saving, settingsError };
 
   useEffect(() => {
     applyTheme(theme);
@@ -159,11 +194,23 @@ export function App({ embedded = false, hostSession, hostTheme }: AppProps) {
     setStack(next);
   }
 
-  function open(next: string) {
-    const value = next.trim();
+  function open(next: string, name?: string | null) {
+    const value = next.trim().toLowerCase();
     if (!value) return;
+    const title = name?.trim();
+    if (title) setSelectedTitles(titles => new Map(titles).set(value, title));
     if (stack.length === 1 && stack[0] === value) setReload(count => count + 1);
     else navigate([value]);
+  }
+
+  function showChat(session: string) {
+    if (id.toLowerCase() === session.toLowerCase()) return;
+    const existing = stack.findIndex(item => item.toLowerCase() === session.toLowerCase());
+    navigate(existing >= 0 ? stack.slice(0, existing + 1) : [session]);
+  }
+
+  function openCurrentChat() {
+    if (currentChatId) showChat(currentChatId);
   }
 
   function inspectAgent(agent: string) {
@@ -200,20 +247,21 @@ export function App({ embedded = false, hostSession, hostTheme }: AppProps) {
   const parentId = stack.length > 1 ? stack.at(-2)! : current?.kind === 'subagent' ? current.parentId : null;
   const parentName = parentId ? metas.get(parentId)?.name ?? null : null;
   const trigger = !id ? '选择会话'
-    : current === null ? sessionLabel(null, id)
-      : current.kind === 'subagent' ? subagentLabel(current)
-        : sessionLabel(current.name, id);
-  const detail = [current?.name, current?.agentPath, id].filter(Boolean).join(' · ') || '切换会话';
+    : current?.kind === 'subagent' ? subagentLabel(current)
+      : sessionLabel(selectedTitles.get(id) ?? current?.name, id);
+  const detail = id ? `${trigger} · ${id}` : '切换会话';
 
   return <main className="shell">
     <header className="session-bar">
       <div className="session-bar-main">
         <h1>Codex 轨迹</h1>
-        <Dropdown className="session-trigger" ariaLabel="切换会话" title={detail}
+        <Dropdown className="session-trigger" ariaLabel={id ? `切换会话，正在查看${trigger}` : trigger} title={detail}
           minWidth={300} maxWidth={520} label={<span className="session-trigger-name">{trigger}</span>}>
-          {close => <SessionMenu current={id} choose={choose => { close(); open(choose); }} />}
+          {close => <SessionMenu current={id}
+            choose={(choice, name) => { close(); open(choice, name); }}
+            chooseCurrentChat={currentChatId ? () => { close(); openCurrentChat(); } : undefined} />}
         </Dropdown>
-        {embedded && hostSession && id === hostSession ? <span className="session-badge">当前聊天</span> : null}
+        {id === currentChatId ? <span className="session-badge">当前聊天</span> : null}
         {current?.kind === 'subagent' ? <span className="session-badge session-badge-agent">子代理</span> : null}
       </div>
       <div className="session-bar-actions">
@@ -234,10 +282,11 @@ export function App({ embedded = false, hostSession, hostTheme }: AppProps) {
         const active = index === stack.length - 1;
         return <div className="session-layer" key={session + ':' + reload} data-active={active}
           aria-hidden={!active || undefined} inert={!active || undefined}>
-          <LoadedSession id={session} active={active} openAgent={inspectAgent} onChoose={chooseAnother} />
+          <LoadedSession id={session} active={active} metas={metas} preferences={preferences} openAgent={inspectAgent}
+            openMainAgent={showChat} onChoose={chooseAnother} />
         </div>;
       })}
-      {stack.length === 0 ? <Welcome open={open} /> : null}
+      {stack.length === 0 ? <Welcome open={open} openCurrentChat={currentChatId ? openCurrentChat : undefined} /> : null}
     </div>
   </main>;
 }

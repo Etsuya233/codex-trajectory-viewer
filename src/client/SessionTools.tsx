@@ -1,6 +1,6 @@
-import { useEffect, useId, useState } from 'react';
+import { useEffect, useId, useRef, useState } from 'react';
 import type { FormEvent } from 'react';
-import type { AgentLink, SearchPage, SessionChoice, SessionStats, TrajectoryEvent } from '../model.ts';
+import type { AgentLink, SearchPage, SessionChoice, SessionMeta, SessionStats, TrajectoryEvent } from '../model.ts';
 import { errorMessage, queryUrl, request, sessionUrl } from './api.ts';
 import { formatCompactNumber, formatExactNumber, formatLongDuration } from './format.ts';
 
@@ -26,18 +26,48 @@ export function agentLabel(agent: AgentLink) {
 }
 
 export function sessionLabel(name: string | null | undefined, id: string) {
-  return name?.trim() || id.slice(0, 8);
+  return name?.trim() || `未命名聊天 · ${shortId(id)}`;
 }
 
 interface AgentMenuProps {
   id: string;
   generation: string;
   revision: number;
+  metas: ReadonlyMap<string, SessionMeta>;
   openAgent: (id: string) => void;
+  openMainAgent: (id: string) => void;
   close: () => void;
 }
 
-export function AgentMenu({ id, generation, revision, openAgent, close }: AgentMenuProps) {
+async function findMainAgent(id: string, metas: ReadonlyMap<string, SessionMeta>, signal: AbortSignal) {
+  const visited = new Set<string>();
+  let next: string | null = id;
+  while (next && !visited.has(next.toLowerCase())) {
+    signal.throwIfAborted();
+    visited.add(next.toLowerCase());
+    const meta: SessionMeta = metas.get(next) ?? await request<SessionMeta>(sessionUrl(next) + '/meta', signal);
+    if (meta.kind === 'thread') return meta;
+    next = meta.parentId;
+  }
+  return null;
+}
+
+export function AgentMenu({ id, generation, revision, metas, openAgent, openMainAgent, close }: AgentMenuProps) {
+  const current = metas.get(id);
+  const [resolvedMain, setResolvedMain] = useState<SessionMeta | null>();
+  const main = current?.kind === 'thread' ? current : resolvedMain;
+  const isMain = main?.id.toLowerCase() === id.toLowerCase();
+  useEffect(() => {
+    if (current?.kind === 'thread') return;
+    const abort = new AbortController();
+    void findMainAgent(id, metas, abort.signal).then(meta => {
+      if (!abort.signal.aborted) setResolvedMain(meta);
+    }).catch(() => {
+      if (!abort.signal.aborted) setResolvedMain(null);
+    });
+    return () => abort.abort();
+  }, [current, id, metas]);
+
   const [agents, setAgents] = useState<AgentLink[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [attempt, setAttempt] = useState(0);
@@ -55,44 +85,64 @@ export function AgentMenu({ id, generation, revision, openAgent, close }: AgentM
     return () => abort.abort();
   }, [generation, id, revision, attempt]);
 
-  if (error) {
-    return <p className="menu-state" role="alert">
+  return <>
+    <div className="agent-menu-navigation">
+      <button type="button" className="menu-option" data-dropdown-option disabled={!main} autoFocus={isMain}
+        aria-current={isMain || undefined} title={main?.id} onClick={() => {
+          if (!main) return;
+          close();
+          openMainAgent(main.id);
+        }}>
+        <span className="menu-option-main">
+          {isMain ? <span className="menu-current" aria-hidden="true">✓ </span> : null}主代理
+        </span>
+        <span className="menu-option-meta">
+          {main ? sessionLabel(main.name, main.id) : main === null ? '无法定位主代理' : '正在定位…'}
+        </span>
+      </button>
+      {current?.kind === 'subagent' ? <button type="button" className="menu-option" data-dropdown-option autoFocus
+        aria-current="true" title={id} onClick={close}>
+        <span className="menu-option-main">
+          <span className="menu-current" aria-hidden="true">✓ </span>
+          {agentLabel({ id, label: shortId(id), name: current.name, path: current.agentPath })}
+        </span>
+        <span className="menu-option-meta">{shortId(id)}{current.agentRole ? ` · ${current.agentRole}` : ''}</span>
+      </button> : null}
+    </div>
+    {error ? <p className="menu-state" role="alert">
       {error} <button type="button" onClick={() => {
         setError(null);
         setAttempt(value => value + 1);
       }}>重试</button>
-    </p>;
-  }
-  if (agents === null) {
-    return <p className="menu-state" role="status">{generation ? '正在读取子代理…' : '正在索引历史…'}</p>;
-  }
-  if (agents.length === 0) return <p className="menu-state">当前会话暂无子代理。</p>;
-  const firstOption = agents.findIndex(agent => agent.id);
-  return <>
-    <div className="menu-heading">子代理<span className="menu-count">{agents.length}</span></div>
-    <ul className="menu-list" aria-label="子代理列表">
-      {agents.map((agent, index) => <li key={agent.id ?? index}>
-        {agent.id
-          ? <button type="button" className="menu-option" data-dropdown-option autoFocus={index === firstOption}
-            title={agent.id} onClick={() => { close(); openAgent(agent.id!); }}>
-            <span className="menu-option-main">{agentLabel(agent)}</span>
-            <span className="menu-option-meta">{shortId(agent.id)}{agent.role ? ` · ${agent.role}` : ''}</span>
-          </button>
-          : <span className="menu-option" aria-disabled="true">
-            <span className="menu-option-main">{agentLabel(agent)}</span>
-            <span className="menu-option-meta">无可用会话 ID</span>
-          </span>}
-      </li>)}
-    </ul>
+    </p> : agents === null ? <p className="menu-state" role="status">
+      {generation ? '正在读取子代理…' : '正在索引历史…'}
+    </p> : agents.length === 0 ? <p className="menu-state">当前会话暂无子代理。</p> : <>
+      <div className="menu-heading">子代理<span className="menu-count">{agents.length}</span></div>
+      <ul className="menu-list" aria-label="子代理列表">
+        {agents.map((agent, index) => <li key={agent.id ?? index}>
+          {agent.id
+            ? <button type="button" className="menu-option" data-dropdown-option
+              title={agent.id} onClick={() => { close(); openAgent(agent.id!); }}>
+              <span className="menu-option-main">{agentLabel(agent)}</span>
+              <span className="menu-option-meta">{shortId(agent.id)}{agent.role ? ` · ${agent.role}` : ''}</span>
+            </button>
+            : <span className="menu-option" aria-disabled="true">
+              <span className="menu-option-main">{agentLabel(agent)}</span>
+              <span className="menu-option-meta">无可用会话 ID</span>
+            </span>}
+        </li>)}
+      </ul>
+    </>}
   </>;
 }
 
 interface SessionMenuProps {
   current: string;
-  choose: (id: string) => void;
+  choose: (id: string, name?: string | null) => void;
+  chooseCurrentChat?: () => void;
 }
 
-export function SessionMenu({ current, choose }: SessionMenuProps) {
+export function SessionMenu({ current, choose, chooseCurrentChat }: SessionMenuProps) {
   const [term, setTerm] = useState('');
   const [attempt, setAttempt] = useState(0);
   const [choices, setChoices] = useState<SessionChoice[] | null>(null);
@@ -132,9 +182,10 @@ export function SessionMenu({ current, choose }: SessionMenuProps) {
         onKeyDown={event => {
           if (event.key === 'Enter' && choices?.[0]) {
             event.preventDefault();
-            choose(choices[0].id);
+            choose(choices[0].id, choices[0].name);
           }
         }} />
+      {chooseCurrentChat ? <button type="button" className="menu-current-chat" onClick={chooseCurrentChat}>当前聊天</button> : null}
     </div>
     {error
       ? <p className="menu-state" role="alert">{error} <button type="button" onClick={() => {
@@ -148,13 +199,13 @@ export function SessionMenu({ current, choose }: SessionMenuProps) {
           : <ul className="menu-list" role="listbox" aria-label="会话列表">
             {choices.map(item => <li key={item.id} role="presentation">
               <button type="button" role="option" aria-selected={item.id === current}
-                className="menu-option" data-dropdown-option title={item.id} onClick={() => choose(item.id)}>
+                className="menu-option" data-dropdown-option title={item.id} onClick={() => choose(item.id, item.name)}>
                 <span className="menu-option-main">
                   {item.id === current ? <span className="menu-current" aria-hidden="true">✓ </span> : null}
                   {sessionLabel(item.name, item.id)}
                 </span>
                 <span className="menu-option-meta">
-                  {formatWhen(item.updatedAt ?? item.date)}{item.archived ? ' · 已归档' : ''} · {shortId(item.id)}
+                  {formatWhen(item.updatedAt ?? item.date)}{item.archived ? ' · 已归档' : ''}{item.name ? ` · ${shortId(item.id)}` : ''}
                 </span>
               </button>
             </li>)}
@@ -174,29 +225,32 @@ export function SessionMenu({ current, choose }: SessionMenuProps) {
 
 interface SearchProps {
   id: string;
+  active: boolean;
   generation: string;
   term: string;
-  tool: string;
   errors: boolean;
+  selected: number | null;
   select: (event: TrajectoryEvent) => void;
   disabled: boolean;
 }
 
-export function SessionSearch({ id, generation, term, tool, errors, select, disabled }: SearchProps) {
+export function SessionSearch({ id, active, generation, term, errors, selected, select, disabled }: SearchProps) {
   const [cursors, setCursors] = useState<(number | undefined)[]>([undefined]);
   const before = cursors.at(-1);
   const [results, setResults] = useState<SearchPage | null>(null);
   const [retry, setRetry] = useState(0);
   const [fault, setFault] = useState<string | null>(null);
   const [busy, setBusy] = useState(true);
+  const list = useRef<HTMLDivElement>(null);
   useEffect(() => {
-    if (!(term.trim() || tool.trim() || errors)) return;
+    if (!active) return;
     const abort = new AbortController();
     const timer = window.setTimeout(() => {
-      const url = queryUrl(sessionUrl(id) + '/search', { q: term, tool, errors: errors ? 1 : undefined, before, generation });
+      const url = queryUrl(sessionUrl(id) + '/search', { q: term, errors: errors ? 1 : undefined, before, generation });
       request<SearchPage>(url, abort.signal).then(page => {
         if (abort.signal.aborted) return;
         setResults(page);
+        setFault(null);
         setBusy(false);
       }).catch(cause => {
         if (abort.signal.aborted) return;
@@ -205,23 +259,33 @@ export function SessionSearch({ id, generation, term, tool, errors, select, disa
       });
     }, 220);
     return () => { abort.abort(); window.clearTimeout(timer); };
-  }, [id, generation, term, tool, errors, before, retry]);
-  if (!(term.trim() || tool.trim() || errors)) return <p className="search-strip">输入搜索词或设置工具筛选。</p>;
-  return <section className="search-strip" aria-label="全会话搜索结果">
-    {results ? <ol>{results.events.map(event => <li key={event.source.offset}>
-      <button type="button" disabled={disabled} onClick={() => select(event)}><strong>{event.label}</strong> {event.preview}</button>
-    </li>)}</ol> : null}
+  }, [id, active, generation, term, errors, before, retry]);
+  function showPage(nextCursors: (number | undefined)[]) {
+    if (list.current) list.current.scrollTop = 0;
+    setBusy(true);
+    setFault(null);
+    setCursors(nextCursors);
+  }
+
+  const next = results?.next;
+  return <section className="search-strip" aria-label="轨迹搜索结果">
+    {results && results.events.length > 0 ? <div className="search-results" ref={list}>
+      <ol>{results.events.map(event => <li key={event.source.offset}>
+        <button type="button" disabled={disabled} aria-current={event.source.offset === selected || undefined}
+          onClick={() => select(event)}><strong>{event.label}</strong> {event.preview}</button>
+      </li>)}</ol>
+    </div> : null}
     {busy ? <p role="status">正在搜索整个会话…</p> : null}
     {fault ? <p role="alert">{fault} <button type="button" onClick={() => {
       setFault(null); setBusy(true); setRetry(value => value + 1);
     }}>重试搜索</button></p> : null}
-    {!busy && results?.events.length === 0 ? <p>会话没有匹配的记录。</p> : null}
-    {!busy && cursors.length > 1 ? <button type="button" onClick={() => {
-      setBusy(true); setFault(null); setCursors(current => current.slice(0, -1));
-    }}>上一页搜索结果</button> : null}
-    {!busy && !fault && results?.next != null ? <button type="button" onClick={() => {
-      setBusy(true); setCursors(current => [...current, results.next!]);
-    }}>下一页搜索结果</button> : null}
+    {!busy && !fault && results?.events.length === 0 ? <p role="status">会话没有匹配的记录。</p> : null}
+    {cursors.length > 1 || next != null ? <div className="search-pages">
+      {cursors.length > 1 ? <button type="button" disabled={busy}
+        onClick={() => showPage(cursors.slice(0, -1))}>上一页搜索结果</button> : null}
+      {!fault && next != null ? <button type="button" disabled={busy}
+        onClick={() => showPage([...cursors, next])}>下一页搜索结果</button> : null}
+    </div> : null}
   </section>;
 }
 

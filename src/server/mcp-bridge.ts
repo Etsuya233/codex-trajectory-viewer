@@ -3,10 +3,11 @@ import {
   CallToolRequestSchema, ErrorCode, ListResourcesRequestSchema, ListToolsRequestSchema, McpError, ReadResourceRequestSchema,
 } from '@modelcontextprotocol/sdk/types.js';
 import type { CallToolResult, Tool } from '@modelcontextprotocol/sdk/types.js';
-import { MCP_CONTEXT, MCP_OPEN, MCP_READ, MCP_SHOW, MCP_UI_MIME, MCP_UI_URI } from '../mcp-contract.ts';
+import { MCP_CONTEXT, MCP_OPEN, MCP_READ, MCP_SETTINGS, MCP_SHOW, MCP_UI_MIME, MCP_UI_URI } from '../mcp-contract.ts';
 import type { PanelContext, PanelResponse } from '../mcp-contract.ts';
 import { RequestError, SESSION_ID } from './session.ts';
 import { createTrajectoryApi } from './api.ts';
+import { accessSettings } from './settings.ts';
 
 const resource = { uri: MCP_UI_URI, name: '本地 Codex 轨迹查看器', mimeType: MCP_UI_MIME };
 const readOnly = { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false };
@@ -36,6 +37,16 @@ const tools: Tool[] = [
     inputSchema: {
       type: 'object', properties: { path: { type: 'string', pattern: '^/api/sessions(?:[/?]|$)', maxLength: 8192 } },
       required: ['path'], additionalProperties: false,
+    },
+  },
+  {
+    name: MCP_SETTINGS, title: '轨迹查看器设置',
+    description: '仅供面板读取或保存本机的轨迹查看器设置。', _meta: privateTool,
+    annotations: { ...readOnly, readOnlyHint: false },
+    inputSchema: {
+      type: 'object', properties: {
+        key: { type: 'string', enum: ['foldTools', 'keepLatestOpen', 'loadAll'] }, value: { type: 'boolean' },
+      }, additionalProperties: false,
     },
   },
 ];
@@ -85,6 +96,13 @@ export function createMcpBridge(
     if (name === MCP_SHOW || name === MCP_OPEN || name === MCP_CONTEXT) {
       if (Object.keys(args).length) throw new McpError(ErrorCode.InvalidParams, '此工具不接受会话身份参数。');
       return panelContext(callingThread(_meta), name !== MCP_CONTEXT);
+    }
+    if (name === MCP_SETTINGS) {
+      try {
+        return panelData({ data: await accessSettings(codexHome, args) });
+      } catch (error) {
+        return panelData({ error: error instanceof RequestError ? error.message : '无法保存或读取查看器设置。' });
+      }
     }
     if (name !== MCP_READ) throw new McpError(ErrorCode.InvalidParams, '未知工具。');
     const { path } = args;

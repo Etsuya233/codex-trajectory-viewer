@@ -67,12 +67,13 @@ function sessionMeta(
   const nickname = string(payload.agent_nickname) ?? string(spawn.agent_nickname);
   const agentPath = string(payload.agent_path) ?? string(spawn.agent_path) ?? null;
   const agentRole = string(payload.agent_role) ?? string(spawn.agent_role) ?? null;
-  const parentId = string(payload.parent_thread_id) ?? string(spawn.parent_thread_id) ?? null;
-  const subagent = payload.thread_source === 'subagent' || agentPath !== null || parentId !== null;
+  const parent = string(payload.parent_thread_id) ?? string(spawn.parent_thread_id);
+  const parentId = parent && SESSION_ID.test(parent) ? parent.toLowerCase() : null;
+  const subagent = payload.thread_source === 'subagent' || agentPath !== null || parent !== undefined;
   const basename = location.path.split(/[\\/]/).at(-1) ?? '';
   return {
     id,
-    name: indexed?.name ?? (subagent ? nickname ?? null : null),
+    name: (subagent ? nickname : undefined) ?? indexed?.name ?? null,
     kind: subagent ? 'subagent' : 'thread',
     parentId,
     agentPath,
@@ -168,7 +169,7 @@ export class SessionCatalog {
     if (cached?.key === cacheKey) return cached.meta;
 
     const indexed = names.get(key);
-    const head = indexed?.name ? null : await readHead(location.path).catch(() => null);
+    const head = await readHead(location.path).catch(() => null);
     const meta = sessionMeta(key, location, indexed, head);
     this.metas.set(key, { key: cacheKey, meta });
     return meta;
